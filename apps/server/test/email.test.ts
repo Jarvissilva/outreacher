@@ -1266,3 +1266,47 @@ it('closes IMAP connections on failure, hides credentials and leaves outgoing ma
     assert.equal((await MailAccountModel.findById(accountId))?.sendingError, '');
   } finally { connect.mock.restore(); close.mock.restore(); }
 });
+it('reads live mail read-only and creates an empty locked reply draft from the validated source', async () => {
+  const { inboxMessageSchema, messageSchema } = await import('@outreachit/shared');
+  await request(app).put(path(`/email-accounts/${accountId}/incoming`)).send({ enabled: true, host: 'imap.example.com', port: 993, tlsMode: 'tls' }).expect(200);
+  const source = Buffer.from([
+    'From: from@example.com', 'Reply-To: reply@example.com', 'Subject: Re: Existing thread',
+    'Message-ID: <original@example.com>', 'References: <older@example.com>', '', 'Original body',
+  ].join('\r\n'));
+  const connect = mock.method(ImapFlow.prototype, 'connect', async () => {});
+  const open = mock.method(ImapFlow.prototype, 'mailboxOpen', async function (this: ImapFlow, ...[mailboxPath, options]: Parameters<ImapFlow['mailboxOpen']>) {
+    assert.equal(mailboxPath, 'INBOX');
+    assert.deepEqual(options, { readOnly: true });
+    const mailbox = { path: 'INBOX', delimiter: '/', flags: new Set<string>(), uidValidity: 7n, uidNext: 6, exists: 1, readOnly: true };
+    this.mailbox = mailbox;
+    return mailbox;
+  });
+  const fetch = mock.method(ImapFlow.prototype, 'fetchOne', async (...[uid, query, options]: Parameters<ImapFlow['fetchOne']>) => {
+    assert.equal(uid, 5);
+    assert.deepEqual(options, { uid: true });
+    return { seq: 1, uid: 5, flags: new Set<string>(), size: source.length, ...(query.source ? { source } : {}) };
+  });
+  const close = mock.method(ImapFlow.prototype, 'close', () => {});
+  try {
+    const response = await request(app).get(path(`/email-accounts/${accountId}/inbox/7/5`)).expect(200);
+    const mail = inboxMessageSchema.parse(response.body);
+    assert.equal(mail.recipient, 'reply@example.com');
+    assert.equal(mail.unread, true);
+    assert.equal(await MessageModel.countDocuments(), 0);
+    const created = await request(app).post(path(`/email-accounts/${accountId}/inbox/reply`)).send({ uidValidity: '7', uid: 5 }).expect(201);
+    const draft = messageSchema.parse(created.body);
+    assert.equal(draft.kind, 'reply');
+    assert.equal(draft.subject, 'Re: Existing thread');
+    assert.equal(draft.html, '');
+    assert.equal(draft.emailAccountId, accountId);
+    assert.deepEqual(draft.addresses, ['reply@example.com']);
+    assert.equal(draft.replyContext?.text.trim(), 'Original body');
+    assert.equal(draft.replyContext?.messageId, '<original@example.com>');
+    assert.deepEqual(draft.replyContext?.references, ['<older@example.com>']);
+    assert.equal(await ContactModel.countDocuments(), 0);
+    await request(app).delete(path(`/email-accounts/${accountId}`)).expect(409);
+    assert.equal(close.mock.callCount(), 2);
+  } finally {
+    connect.mock.restore(); open.mock.restore(); fetch.mock.restore(); close.mock.restore();
+  }
+});

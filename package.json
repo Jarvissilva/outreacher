@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "pnpm --filter @outreachit/shared build && pnpm -r --parallel dev",
     "build": "pnpm -r build",
+    "start": "pnpm --filter @outreachit/server start",
     "typecheck": "pnpm --filter @outreachit/shared build && pnpm -r typecheck",
     "lint": "eslint .",
     "test": "pnpm --filter @outreachit/shared build && pnpm --filter @outreachit/server test && pnpm --filter @outreachit/client test"

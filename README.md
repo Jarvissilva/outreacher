@@ -105,11 +105,54 @@ pnpm test
 pnpm lint
 pnpm typecheck
 pnpm build
-pnpm --filter @outreachit/server start
+NODE_ENV=production PORT=6004 pnpm start
 ```
 
 `pnpm --filter @outreachit/client preview` previews the built client locally.
 Express serves the built client with SPA fallback; API and unsubscribe paths are excluded from fallback.
+
+### Production background service
+
+Install PM2 on the host if it is not already available. Keep the existing
+`apps/server/.env` and its encryption key unchanged. The PM2 configuration loads
+that file for database and mail settings and sets `NODE_ENV=production`,
+`HOST=127.0.0.1`, and `PORT=6004`. The UI and API share
+http://127.0.0.1:6004; Vite is not needed in production. Deployment-specific bind
+and port values can be changed in `ecosystem.config.cjs`.
+
+Run these commands from the repository root as the user who owns the PM2 service:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+pm2 start ecosystem.config.cjs --only outreachit
+pm2 save
+```
+
+Stop any previous OutreachIt development server or worker before starting the
+production process. Run one instance only so startup migrations and sending
+workers do not overlap. Existing application data and credentials are reused.
+
+```sh
+pm2 status outreachit
+pm2 logs outreachit --lines 50
+curl --fail http://127.0.0.1:6004/api/health
+```
+
+For updates, stop OutreachIt before installing/building, then start it again:
+
+```sh
+pm2 stop outreachit
+pnpm install --frozen-lockfile
+pnpm build
+pm2 restart ecosystem.config.cjs --only outreachit --update-env
+pm2 save
+```
+
+Use `pm2 stop outreachit` to stop the service. To restore saved processes after
+a reboot, configure PM2's startup service once using `pm2 startup` and follow its
+printed instructions. Reuse an existing enabled PM2 startup service when present.
+Keep the app bound to localhost for internal use; it has no authentication.
 
 Client tests use Vitest and Testing Library to exercise project navigation,
 sidebar creation, Settings, redirects, and state reset. API integration tests use a

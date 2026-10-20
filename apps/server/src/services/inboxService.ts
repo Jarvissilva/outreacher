@@ -11,16 +11,21 @@ export const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 export function validMessageId(value: string | undefined) {
   return value && value.length <= 998 && /^<[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9.-]+>$/.test(value) ? value : '';
 }
+function mailDate(value: string | Date | undefined) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
 export async function parseIncoming(source: Buffer) {
   if (source.length > MAX_SOURCE_BYTES) throw new HttpError(413, 'Message exceeds the 20 MiB download limit.');
   const parsed = await simpleParser(source, { skipHtmlToText: true, skipTextToHtml: true, skipImageLinks: true });
   const recipient = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address ?? '';
   const references = (Array.isArray(parsed.references) ? parsed.references : [parsed.references ?? '']).filter((v: string) => validMessageId(v)).slice(-50);
   return {
-    html: cleanHtml(parsed.html || ''), text: parsed.text ?? plainText(cleanHtml(parsed.html || '')), recipient: z.email().safeParse(recipient).success ? recipient : '',
+    html: cleanHtml(parsed.html || ''), text: parsed.text || plainText(cleanHtml(parsed.html || '')), recipient: z.email().safeParse(recipient).success ? recipient : '',
     messageId: validMessageId(parsed.messageId), references,
     subject: (parsed.subject ?? '').replace(/[\r\n]/g, ' ').slice(0, 490),
-    from: parsed.from?.text ?? '', date: parsed.date && !Number.isNaN(parsed.date.getTime()) ? parsed.date.toISOString() : null,
+    from: parsed.from?.text ?? '', date: mailDate(parsed.date),
   };
 }
 export function createImap(account: Awaited<ReturnType<typeof getMailAccount>>) {
@@ -63,7 +68,7 @@ export async function listInbox(client: ImapFlow, accountId: string, page: numbe
   if (end > 0) for await (const row of client.fetch(`${Math.max(1, end - 49)}:${end}`, { uid: true, envelope: true, flags: true })) {
     items.push({ accountId, uidValidity: String(uidValidity), uid: row.uid,
       from: row.envelope?.from?.map((a: { name?: string | null; address?: string | null }) => a.name ? `${a.name} <${a.address ?? ''}>` : a.address ?? '').join(', ') ?? '',
-      subject: row.envelope?.subject ?? '', date: row.envelope?.date?.toISOString() ?? null,
+      subject: row.envelope?.subject ?? '', date: mailDate(row.envelope?.date),
       unread: !row.flags?.has('\\Seen'),
     });
   }

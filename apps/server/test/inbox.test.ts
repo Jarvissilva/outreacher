@@ -38,18 +38,46 @@ it('paginates headers newest first without fetching bodies and detects stale or 
   Object.defineProperty(client, 'mailbox', { value: { path: 'INBOX', exists: 101, uidValidity: 7n }, configurable: true });
   const fetch = mock.method(client, 'fetch', async function* (range: unknown, query: { source?: unknown }) {
     assert.equal(range, '2:51'); assert.equal(query.source, undefined);
-    yield { seq: 2, uid: 2, envelope: { subject: 'Older' }, flags: new Set(['\\Seen']) };
-    yield { seq: 51, uid: 51, envelope: { subject: 'Newer' }, flags: new Set() };
+    yield { seq: 2, uid: 2, envelope: { subject: 'Older', date: 'invalid date' }, flags: new Set(['\\Seen']) };
+    yield { seq: 51, uid: 51, envelope: { subject: 'Newer', date: '2026-10-20T10:00:00Z' }, flags: new Set() };
   });
   try {
     const page = await listInbox(client, accountId, 2);
     assert.deepEqual(page.items.map(m => m.uid), [51, 2]);
     assert.equal(page.items[0]?.unread, true);
     assert.equal(page.items[1]?.unread, false);
+    assert.equal(page.items[0]?.date, '2026-10-20T10:00:00.000Z');
+    assert.equal(page.items[1]?.date, null);
     assert.equal((await listInbox(client, accountId, 4)).items.length, 0);
     assert.equal(fetch.mock.callCount(), 1);
     await assert.rejects(readInbox(client, accountId, { uidValidity: '6', uid: 2 }), /Mailbox changed/);
     mock.method(client, 'fetchOne', async (): Promise<false> => false);
     await assert.rejects(readInbox(client, accountId, { uidValidity: '7', uid: 2 }), /no longer/);
   } finally { mock.restoreAll(); client.close(); }
+});
+it('bounds body fetches, preserves flags and rejects oversized messages before MIME parsing', async () => {
+  const client = new ImapFlow({ host: 'localhost', port: 993, secure: true, auth: { user: 'test', pass: 'test' }, logger: false });
+  Object.defineProperty(client, 'mailbox', { value: { path: 'INBOX', exists: 1, uidValidity: 7n }, configurable: true });
+  let oversized = false;
+  const flags = new Set(['\\Seen']);
+  const source = Buffer.from('From: sender@example.com\r\nDate: Tue, 20 Oct 2026 10:00:00 +0000\r\n\r\nPlain text body');
+  const fetch = mock.method(client, 'fetchOne', async (...[uid, query, options]: Parameters<ImapFlow['fetchOne']>) => {
+    assert.equal(uid, 5);
+    assert.deepEqual(options, { uid: true });
+    if (query.source) {
+      assert.deepEqual(query.source, { start: 0, maxLength: MAX_SOURCE_BYTES + 1 });
+      return { seq: 1, uid: 5, source };
+    }
+    return { seq: 1, uid: 5, flags, size: oversized ? MAX_SOURCE_BYTES + 1 : source.length };
+  });
+  try {
+    const mail = await readInbox(client, accountId, { uidValidity: '7', uid: 5 });
+    assert.equal(mail.text.trim(), 'Plain text body');
+    assert.equal(mail.date, '2026-10-20T10:00:00.000Z');
+    assert.equal(mail.unread, false);
+    assert.deepEqual(flags, new Set(['\\Seen']));
+    oversized = true;
+    await assert.rejects(readInbox(client, accountId, { uidValidity: '7', uid: 5 }), /20 MiB/);
+    assert.equal(fetch.mock.callCount(), 3);
+  } finally { fetch.mock.restore(); client.close(); }
 });
