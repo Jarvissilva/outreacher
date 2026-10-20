@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    ports:
+      - '127.0.0.1:3001:3001'
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3001
+      MONGODB_URI: mongodb://mongodb:27017/outreachit
+      EMAIL_ENCRYPTION_KEY: ${EMAIL_ENCRYPTION_KEY:-}
+      PUBLIC_UNSUBSCRIBE_BASE_URL: ${PUBLIC_UNSUBSCRIBE_BASE_URL:-}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+  mongodb:
+    image: mongo:8.0
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test:
+        ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
