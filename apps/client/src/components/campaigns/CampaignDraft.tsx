@@ -1,26 +1,24 @@
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { z } from 'zod';
+import { useContactSearch } from '@/hooks/use-contact-search';
+import { useRouteAction } from '@/lib/route-data';
+import type { editorLoader } from '@/pages/CampaignsPage';
+import type { Campaign, CampaignInput } from '@outreacher/shared';
+import {
+  audiencePreviewSchema,
+  audienceSchema,
+  campaignInputSchema,
+  campaignSchema,
+  previewSchema,
+} from '@outreacher/shared';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { ArrowLeft, Eye, Mail, Send, ShieldCheck, Users } from 'lucide-react';
-import {
-  audienceSchema,
-  campaignSchema,
-  campaignInputSchema,
-  templateSchema,
-  contactListSchema,
-  audiencePreviewSchema,
-  emailAccountSchema,
-  sendingSettingsSchema,
-  previewSchema,
-} from '@outreachit/shared';
-import type { CampaignInput, Campaign } from '@outreachit/shared';
-import { api, mutate } from '@/lib/api';
+import { useRef, useState } from 'react';
+import { Link, useLoaderData, useNavigate } from 'react-router';
+import { z } from 'zod';
+
+import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 export function CampaignDraft({
   projectId,
   campaign,
@@ -29,7 +27,9 @@ export function CampaignDraft({
   campaign?: Campaign;
 }) {
   const navigate = useNavigate();
-  const client = useQueryClient();
+  const operation = useRouteAction();
+  const data = useLoaderData<typeof editorLoader>();
+  const draftId = useRef(campaign?.id);
   const [name, setName] = useState(campaign?.name ?? '');
   const [emailAccountId, setEmailAccountId] = useState(
     campaign?.emailAccountId ?? '',
@@ -82,78 +82,34 @@ export function CampaignDraft({
     campaign: Campaign;
     audience: z.infer<typeof audiencePreviewSchema>;
   }>();
-  const templates = useQuery({
-    queryKey: ['project', projectId, 'templates'],
-    queryFn: () =>
-      api(`/projects/${projectId}/templates`, z.array(templateSchema)),
-  });
+  const templates = data.templates;
   const [contactPage, setContactPage] = useState(1);
   const [contactSearch, setContactSearch] = useState('');
-  const contacts = useQuery({
-    queryKey: [
-      'project',
-      projectId,
-      'audience-contacts',
-      contactPage,
-      contactSearch,
-      audience.mode,
-      audience.filters,
-    ],
-    queryFn: () => {
-      const query = new URLSearchParams({
-        limit: '25',
-        page: String(contactPage),
-        search: audience.mode === 'filters' ? audience.filters.search : contactSearch,
-      });
-      if (audience.mode === 'filters') {
-        query.set('status', audience.filters.status);
-        if (audience.filters.fieldKey) {
-          query.set('fieldKey', audience.filters.fieldKey);
-          query.set('fieldValue', audience.filters.fieldValue);
-        }
-      }
-      return api(`/projects/${projectId}/contacts?${query}`, contactListSchema);
-    },
-  });
-  const settings = useQuery({
-    queryKey: ['project', projectId, 'sending-settings'],
-    queryFn: () =>
-      api(`/projects/${projectId}/sending-settings`, sendingSettingsSchema),
-  });
-  const accounts = useQuery({
-    queryKey: ['project', projectId, 'email-accounts'],
-    queryFn: () =>
-      api(`/projects/${projectId}/email-accounts`, z.array(emailAccountSchema)),
-  });
-  const selectedAccount = accounts.data?.find((a) => a.id === emailAccountId);
-  const fields = useQuery({
-    queryKey: ['project', projectId, 'fields'],
-    queryFn: () =>
-      api(
-        `/projects/${projectId}/custom-fields`,
-        z.array(z.object({ key: z.string(), label: z.string() })),
-      ),
-  });
+  const contactQuery = new URLSearchParams({ limit: '25', page: String(contactPage), search: audience.mode === 'filters' ? audience.filters.search : contactSearch });
+  if (audience.mode === 'filters') {
+    contactQuery.set('status', audience.filters.status);
+    if (audience.filters.fieldKey) { contactQuery.set('fieldKey', audience.filters.fieldKey); contactQuery.set('fieldValue', audience.filters.fieldValue); }
+  }
+  const contacts = useContactSearch(projectId, contactQuery.toString());
+  const settings = data.settings;
+  const accounts = data.accounts;
+  const selectedAccount = accounts.find(a => a.id === emailAccountId);
+  const fields = data.fields;
   async function renderPreview() {
     setPreviewBusy(true);
     setPreviewError(undefined);
     setPreview(undefined);
     setPreviewRecipient(contacts.data?.items.find((contact) => contact.id === previewContactId)?.email ?? '');
     try {
-      const template = templates.data?.find((t) => t.id === templateId);
+      const template = templates?.find((t) => t.id === templateId);
       if (emailSource === 'template' && !template)
         throw new Error('Choose a template before previewing.');
-      setPreview(await api(
-        `/projects/${projectId}/templates/preview`,
-        previewSchema,
-        'POST',
-        {
-          name: name.trim() || 'Campaign preview',
-          subject: emailSource === 'template' ? template?.subject : subject,
-          html: emailSource === 'template' ? template?.html : editor?.getHTML(),
-          contactId: previewContactId,
-        },
-      ));
+      setPreview(await operation.submit('preview', {
+        name: name.trim() || 'Campaign preview',
+        subject: emailSource === 'template' ? template?.subject : subject,
+        html: emailSource === 'template' ? template?.html : editor?.getHTML(),
+        contactId: previewContactId,
+      }, previewSchema));
     } catch (e) {
       setPreviewError(e);
     } finally {
@@ -181,24 +137,14 @@ export function CampaignDraft({
         startHour: startHour === '' ? null : Number(startHour),
         endHour: endHour === '' ? null : Number(endHour),
       });
-      const c = await api(
-        `/projects/${projectId}/campaigns${campaign ? `/${campaign.id}` : ''}`,
-        campaignSchema,
-        campaign ? 'PUT' : 'POST',
-        input,
-      );
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'campaigns'],
-      });
       if (forReview) {
-        const audiencePreview = await api(
-          `/projects/${projectId}/campaigns/audience-preview`,
-          audiencePreviewSchema,
-          'POST',
-          { audience: c.audience, templateId: c.templateId, message: c.message },
-        );
-        setReview({ campaign: c, audience: audiencePreview });
-      } else navigate(`/projects/${projectId}/campaigns/${c.id}`);
+        const result = await operation.submit('review', { id: draftId.current, input }, z.object({ campaign: campaignSchema, audience: audiencePreviewSchema }));
+        draftId.current = result.campaign.id;
+        setReview(result);
+      } else {
+        const c = await operation.submit('save', { id: draftId.current, input }, campaignSchema);
+        draftId.current = c.id;
+      }
     } catch (e) {
       setError(e);
     } finally {
@@ -210,11 +156,7 @@ export function CampaignDraft({
     setError(undefined);
     setBusy(true);
     try {
-      await mutate(`/projects/${projectId}/campaigns/${campaign.id}`, 'DELETE');
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'campaigns'],
-      });
-      navigate(`/projects/${projectId}/campaigns`);
+      await operation.submit('delete', { id: draftId.current }, z.unknown());
     } catch (e) {
       setError(e);
     } finally {
@@ -226,16 +168,7 @@ export function CampaignDraft({
     setBusy(true);
     setError(undefined);
     try {
-      const c = await api(
-        `/projects/${projectId}/campaigns/${review.campaign.id}/launch`,
-        campaignSchema,
-        'POST',
-        { confirmed: true },
-      );
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'campaigns'],
-      });
-      navigate(`/projects/${projectId}/campaigns/${c.id}`);
+      await operation.submit('launch', { id: review.campaign.id }, campaignSchema);
     } catch (e) {
       setError(e);
     } finally {
@@ -250,24 +183,24 @@ export function CampaignDraft({
         <p>
           Mail account:{' '}
           {
-            accounts.data?.find((a) => a.id === review.campaign.emailAccountId)
+            accounts?.find((a) => a.id === review.campaign.emailAccountId)
               ?.name
           }
           <br />
           Sender:{' '}
           {
-            accounts.data?.find((a) => a.id === review.campaign.emailAccountId)
+            accounts?.find((a) => a.id === review.campaign.emailAccountId)
               ?.senderName
           }{' '}
           &lt;
-          {accounts.data?.find((a) => a.id === review.campaign.emailAccountId)
+          {accounts?.find((a) => a.id === review.campaign.emailAccountId)
             ?.senderEmail ?? 'Not configured'}
           &gt;
         </p>
         <p>
           {review.campaign.message
             ? `Subject: ${review.campaign.message.subject}`
-            : `Template: ${templates.data?.find((t) => t.id === review.campaign.templateId)?.name ?? 'Unavailable'}`}
+            : `Template: ${templates?.find((t) => t.id === review.campaign.templateId)?.name ?? 'Unavailable'}`}
         </p>
         <p>
           {review.audience.eligible} eligible recipients;{' '}
@@ -281,7 +214,7 @@ export function CampaignDraft({
         </p>
         <p>
           Sending window time zone:{' '}
-          {settings.data?.timeZone ?? 'Configure email settings'}. Days:{' '}
+          {settings?.timeZone ?? 'Configure email settings'}. Days:{' '}
           {weekdays.length
             ? weekdays
               .map(
@@ -318,8 +251,8 @@ export function CampaignDraft({
           <Button
             disabled={
               busy ||
-              !settings.data ||
-              !accounts.data?.some(
+              !settings ||
+              !accounts?.some(
                 (a) => a.id === review.campaign.emailAccountId,
               )
             }
@@ -422,8 +355,8 @@ export function CampaignDraft({
                     Clear selection
                   </Button>
                 </div>}
-                {contacts.isPending && <p className="text-sm">Loading contacts…</p>}
-                <ErrorMessage error={contacts.error} />
+                {contacts.state !== 'idle' && <p className="text-sm">Loading contacts…</p>}
+
                 {contacts.data?.items.length === 0 && <p className="text-sm">No contacts found.</p>}
                 <div className="campaign-contact-list">
                   {contacts.data?.items.map((c) => (
@@ -476,7 +409,7 @@ export function CampaignDraft({
             )}
             {audience.mode === 'filters' && (
               <>
-                <ErrorMessage error={fields.error} />
+
                 <label>
                   Search
                   <Input
@@ -527,7 +460,7 @@ export function CampaignDraft({
                     }
                   >
                     <option value="">No custom field filter</option>
-                    {fields.data?.map((f) => (
+                    {fields?.map((f) => (
                       <option key={f.key} value={f.key}>
                         {f.label}
                       </option>
@@ -598,7 +531,7 @@ export function CampaignDraft({
                   required
                 >
                   <option value="">Choose a mail account</option>
-                  {accounts.data?.map((a) => (
+                  {accounts?.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name} — {a.senderEmail}
                     </option>
@@ -612,7 +545,6 @@ export function CampaignDraft({
                 {selectedAccount.senderEmail}&gt;
               </p>
             )}
-            <ErrorMessage error={accounts.error ?? settings.error} />
             {activeTab === 'compose' ? (
               <div id="campaign-compose-panel" role="tabpanel" aria-labelledby="campaign-compose-tab" className="campaign-compose-content">
                 <label>
@@ -637,17 +569,17 @@ export function CampaignDraft({
                         required
                       >
                         <option value="">Choose a template</option>
-                        {templates.data?.map((t) => (
+                        {templates?.map((t) => (
                           <option key={t.id} value={t.id}>{t.name}</option>
                         ))}
                       </select>
                     </label>
-                    {!templates.isPending && templates.data?.length === 0 && (
+                    {templates?.length === 0 && (
                       <p className="text-sm text-muted-foreground">
                         No templates yet. Choose “Write an email” to compose here.
                       </p>
                     )}
-                    <ErrorMessage error={templates.error} />
+
                   </>
                 ) : (
                   <>
@@ -723,7 +655,7 @@ export function CampaignDraft({
                     {previewBusy ? 'Rendering…' : 'Render preview'}
                   </Button>
                 </div>
-                <ErrorMessage error={previewError ?? contacts.error} />
+                <ErrorMessage error={previewError} />
                 {preview ? (
                   <div className="campaign-email-preview">
                     <div className="campaign-email-envelope">
@@ -761,7 +693,7 @@ export function CampaignDraft({
                   Scheduled time uses your browser time zone (
                   {Intl.DateTimeFormat().resolvedOptions().timeZone}) and is stored in
                   UTC. Sending windows use the project time zone (
-                  {settings.data?.timeZone ?? 'configure in Settings'}).
+                  {settings?.timeZone ?? 'configure in Settings'}).
                 </p>
                 <fieldset>
                   <legend>Allowed weekdays (none means every day)</legend>

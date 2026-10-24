@@ -1,7 +1,3 @@
-import { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { Check, ChevronsUpDown, FolderOpen, Plus } from 'lucide-react';
-import type { Project } from '@outreachit/shared';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -11,6 +7,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import type { Project } from '@outreacher/shared';
+import { Check, ChevronsUpDown, FolderOpen, Plus } from 'lucide-react';
+import { useState } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { ProjectDialog } from './ProjectDialog';
 
 export function ProjectSwitcher({
@@ -67,7 +67,6 @@ export function ProjectSwitcher({
       {creating && (
         <ProjectDialog
           onClose={() => setCreating(false)}
-          onCreated={(created) => navigate(`/projects/${created.id}`)}
         />
       )}
     </>

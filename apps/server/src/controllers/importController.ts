@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express';
-import { importRequestSchema } from '@outreachit/shared';
-import type { ContactInput } from '@outreachit/shared';
-import { ContactModel } from '../models/index.js';
+import { importRequestSchema } from '@outreacher/shared';
+import type { ContactInput } from '@outreacher/shared';
+import { createContact } from '../db/repositories/contacts.js';
 import { isDuplicate } from '../lib/HttpError.js';
 import { getProjectId } from '../lib/getProjectId.js';
 import { parseCsv, prepareImport } from '../services/importService.js';
@@ -54,10 +54,7 @@ export const importContacts: RequestHandler = async (request, response) => {
   }
   for (const contact of contacts) {
     try {
-      await ContactModel.create({
-        ...contact,
-        projectId: getProjectId(request),
-      });
+      createContact(getProjectId(request), contact);
       result.imported++;
     } catch (error) {
       if (!isDuplicate(error)) throw error;

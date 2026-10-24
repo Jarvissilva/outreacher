@@ -3,14 +3,24 @@ import {
   campaignInputSchema,
   campaignContentSchema,
   audienceSchema,
-} from '@outreachit/shared';
+} from '@outreacher/shared';
 import { z } from 'zod';
-import { ContactModel, FieldModel } from '../models/index.js';
+import { audienceContacts as repositoryAudienceContacts } from '../db/repositories/contacts.js';
 import {
-  CampaignModel,
-  TemplateModel,
-  RecipientJobModel,
-} from '../models/EmailModels.js';
+  campaignPreparationOwned,
+  claimCampaignPreparation,
+  failCampaignPreparation,
+  findCampaign as findCampaignRecord,
+  finishCampaignPreparation,
+  renewCampaignPreparation,
+} from '../db/repositories/campaigns.js';
+import type { Campaign } from '../db/repositories/campaigns.js';
+import { findFieldByKey } from '../db/repositories/customFields.js';
+import { findTemplate } from '../db/repositories/templates.js';
+import {
+  createJob,
+  deleteJobsForCampaign,
+} from '../db/repositories/jobs.js';
 import { HttpError } from '../lib/HttpError.js';
 import {
   getMailAccount,
@@ -19,6 +29,7 @@ import {
   unsubscribeUrl,
   validateTemplate,
 } from './emailService.js';
+
 export async function audienceContacts(projectId: string, input: unknown) {
   const audience = audienceSchema.parse(input);
   const q = audience.filters;
@@ -27,54 +38,23 @@ export async function audienceContacts(projectId: string, input: unknown) {
   if (
     audience.mode === 'filters' &&
     q.fieldKey &&
-    !(await FieldModel.exists({ projectId, key: q.fieldKey }))
+    !findFieldByKey(projectId, q.fieldKey)
   )
     throw new HttpError(404, 'Custom field not found.');
   if (audience.mode === 'filters' && q.fieldValue && !q.fieldKey)
     throw new HttpError(400, 'Choose a custom field.');
-  const literal = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return ContactModel.find({
-    projectId,
-    deletedAt: null,
-    ...(audience.mode === 'selected'
-      ? { _id: { $in: audience.contactIds } }
-      : {}),
-    ...(audience.mode === 'filters'
-      ? {
-        ...(q.status === 'all'
-          ? {}
-          : { suppressed: q.status === 'suppressed' }),
-        ...(q.fieldKey
-          ? {
-            [`customFields.${q.fieldKey}`]: {
-              $regex: literal(q.fieldValue),
-              $options: 'i',
-            },
-          }
-          : {}),
-        ...(q.search
-          ? {
-            $or: [
-              'email',
-              'firstName',
-              'lastName',
-              'company',
-              'city',
-              'source',
-            ].map((k) => ({
-              [k]: { $regex: literal(q.search), $options: 'i' },
-            })),
-          }
-          : {}),
-      }
-      : {}),
-  });
+  return repositoryAudienceContacts(projectId, audience);
 }
-export async function findCampaign(projectId: string, id: string) {
-  const c = await CampaignModel.findOne({ _id: id, projectId });
-  if (!c) throw new HttpError(404, 'Campaign not found.');
-  return c;
+
+export async function findCampaign(
+  projectId: string,
+  id: string,
+): Promise<Campaign> {
+  const campaign = findCampaignRecord(projectId, id);
+  if (!campaign) throw new HttpError(404, 'Campaign not found.');
+  return campaign;
 }
+
 export async function campaignMessage(projectId: string, value: unknown) {
   const content = campaignContentSchema.parse(value);
   if (content.message)
@@ -82,10 +62,8 @@ export async function campaignMessage(projectId: string, value: unknown) {
       name: 'Campaign email',
       ...content.message,
     });
-  const template = await TemplateModel.findOne({
-    _id: content.templateId,
-    projectId,
-  });
+  if (!content.templateId) throw new HttpError(404, 'Template not found.');
+  const template = findTemplate(projectId, content.templateId);
   if (!template) throw new HttpError(404, 'Template not found.');
   return validateTemplate(projectId, {
     name: template.name,
@@ -93,6 +71,7 @@ export async function campaignMessage(projectId: string, value: unknown) {
     html: template.html,
   });
 }
+
 export async function validateCampaign(projectId: string, value: unknown) {
   const input = campaignInputSchema.parse(value);
   const message = await campaignMessage(projectId, {
@@ -102,6 +81,7 @@ export async function validateCampaign(projectId: string, value: unknown) {
   await getMailAccount(projectId, input.emailAccountId);
   return { ...input, message: input.message ? message : null };
 }
+
 export async function launchCampaign(
   projectId: string,
   id: string,
@@ -121,10 +101,7 @@ export async function launchCampaign(
     return existing;
   if (!existing.emailAccountId)
     throw new HttpError(400, 'Choose a mail account before launching.');
-  const settings = await getMailAccount(
-    projectId,
-    String(existing.emailAccountId),
-  );
+  const settings = await getMailAccount(projectId, existing.emailAccountId);
   const policy = await getSendingSettings(projectId);
   if (!settings.senderEmail || !settings.host)
     throw new HttpError(400, 'Configure a sender before launching.');
@@ -132,50 +109,33 @@ export async function launchCampaign(
   if (existing.scheduledAt && existing.scheduledAt <= new Date())
     throw new HttpError(400, 'Choose a future scheduled time.');
   const preparationToken = randomUUID();
-  const campaign = await CampaignModel.findOneAndUpdate(
-    { _id: id, projectId, state: existing.state },
-    {
-      $set: {
-        state: 'preparing',
-        preparationToken,
-        preparationUntil: new Date(Date.now() + 120000),
-        error: '',
-      },
-    },
-    { returnDocument: 'after' },
+  const campaign = claimCampaignPreparation(
+    projectId,
+    id,
+    existing.state,
+    preparationToken,
+    new Date(Date.now() + 120000),
   );
   if (!campaign) return findCampaign(projectId, id);
   try {
-    await RecipientJobModel.deleteMany({ projectId, campaignId: id });
+    deleteJobsForCampaign(projectId, id);
     const template = await campaignMessage(projectId, {
-      templateId: campaign.templateId ? String(campaign.templateId) : null,
-      message: campaign.message
-        ? { subject: campaign.message.subject, html: campaign.message.html }
-        : null,
+      templateId: campaign.templateId,
+      message: campaign.message,
     });
-    const contacts = await audienceContacts(
-      projectId,
-      campaign.toObject().audience,
-    );
+    const contacts = await audienceContacts(projectId, campaign.audience);
     let total = 0;
     for (const contact of contacts) {
       if (contact.suppressed) continue;
-      if (
-        !(await CampaignModel.exists({
-          _id: id,
-          projectId,
-          state: 'preparing',
-          preparationToken,
-        }))
-      )
+      if (!campaignPreparationOwned(projectId, id, preparationToken))
         throw new Error('Preparation lease lost');
-      const url = unsubscribeUrl(projectId, String(contact._id));
+      const url = unsubscribeUrl(projectId, contact.id);
       const message = renderMessage(template, contact, url);
-      await RecipientJobModel.create({
+      createJob({
         projectId,
         campaignId: id,
         preparationToken,
-        contactId: contact._id,
+        contactId: contact.id,
         email: contact.email,
         subject: message.subject,
         html: message.html,
@@ -183,39 +143,33 @@ export async function launchCampaign(
         unsubscribeUrl: url,
       });
       total++;
-      await CampaignModel.updateOne(
-        { _id: id, projectId, state: 'preparing', preparationToken },
-        { $set: { preparationUntil: new Date(Date.now() + 120000) } },
+      renewCampaignPreparation(
+        projectId,
+        id,
+        preparationToken,
+        new Date(Date.now() + 120000),
       );
     }
-    await CampaignModel.updateOne(
-      { _id: id, projectId, state: 'preparing', preparationToken },
-      {
-        $set: {
-          total,
-          senderName: settings.senderName,
-          senderEmail: settings.senderEmail,
-          replyTo: settings.replyTo,
-          emailAccountId: settings._id,
-          timeZone: policy.timeZone,
-          state: campaign.scheduledAt ? 'scheduled' : 'active',
-        },
-      },
-    );
+    finishCampaignPreparation(projectId, id, preparationToken, {
+      total,
+      senderName: settings.senderName,
+      senderEmail: settings.senderEmail,
+      replyTo: settings.replyTo,
+      emailAccountId: settings.id,
+      timeZone: policy.timeZone,
+      state: campaign.scheduledAt ? 'scheduled' : 'active',
+    });
   } catch {
-    await CampaignModel.updateOne(
-      { _id: id, projectId, state: 'preparing', preparationToken },
-      {
-        $set: {
-          state: 'preparation_failed',
-          error:
-            'Preparation interrupted or invalid. Review the email and explicitly retry.',
-        },
-      },
+    failCampaignPreparation(
+      projectId,
+      id,
+      preparationToken,
+      'Preparation interrupted or invalid. Review the email and explicitly retry.',
     );
   }
   return findCampaign(projectId, id);
 }
+
 export function inSendingWindow(
   c: {
     timeZone: string;

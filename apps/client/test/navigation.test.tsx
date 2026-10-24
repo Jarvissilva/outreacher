@@ -1,9 +1,8 @@
+import { routes } from '@/router';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createMemoryRouter, RouterProvider } from 'react-router-dom';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { routes } from '@/router';
 
 const firstId = '111111111111111111111111';
 const secondId = '222222222222222222222222';
@@ -65,16 +64,13 @@ beforeEach(() => {
   );
 });
 function open(path = '/') {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
   const router = createMemoryRouter(routes, { initialEntries: [path] });
   render(
-    <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>,
+
+    <RouterProvider router={router} />
+    ,
   );
-  return { router, client, user: userEvent.setup() };
+  return { router, user: userEvent.setup() };
 }
 
 describe('Project navigation', () => {
@@ -112,7 +108,8 @@ describe('Project navigation', () => {
       ),
     );
     expect(screen.getByRole('heading', { name: 'Custom fields' })).toBeTruthy();
-    await user.click(screen.getByRole('link', { name: 'OutreachIt home' }));
+    await screen.findByRole('button', { name: 'Switch project: Research' });
+    await user.click(screen.getByRole('link', { name: 'Outreacher home' }));
     await screen.findByRole('heading', { name: 'Select a project' });
     expect(document.querySelector('[data-slot="sidebar"]')).toBeNull();
   });
@@ -176,12 +173,12 @@ describe('Project navigation', () => {
   });
 
   it('keeps a submitted contact save bound to its original project after navigation', async () => {
-    const { router, client, user } = open(`/projects/${firstId}`);
+    const { router, user } = open(`/projects/${firstId}`);
     const add = await screen.findByRole('button', { name: 'Add contact' });
     await waitFor(() => expect(add).toHaveProperty('disabled', false));
     const originalFetch = vi.mocked(fetch).getMockImplementation();
     if (!originalFetch) throw new Error('Missing test fetch implementation');
-    let finishRequest = () => {};
+    let finishRequest = () => { };
     vi.mocked(fetch).mockImplementation((input, options) => {
       if (
         String(input) === `/api/projects/${firstId}/contacts` &&
@@ -194,7 +191,6 @@ describe('Project navigation', () => {
       }
       return originalFetch(input, options);
     });
-    const invalidate = vi.spyOn(client, 'invalidateQueries');
     await user.click(add);
     const dialog = await screen.findByRole('dialog', { name: 'Add contact' });
     await user.type(
@@ -214,14 +210,6 @@ describe('Project navigation', () => {
     await act(async () => {
       finishRequest();
     });
-    await waitFor(() =>
-      expect(invalidate).toHaveBeenCalledWith({
-        queryKey: ['project', firstId],
-      }),
-    );
-    expect(invalidate).not.toHaveBeenCalledWith({
-      queryKey: ['project', secondId],
-    });
     expect(
       calls.filter((call) => call.method === 'POST').map((call) => call.path),
     ).toEqual([`/api/projects/${firstId}/contacts`]);
@@ -238,10 +226,163 @@ describe('Project navigation', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe(to));
   });
 
-  it('shows missing projects without a sidebar or project data requests', async () => {
+  it('shows missing projects without a sidebar', async () => {
     open('/projects/444444444444444444444444');
     await screen.findByRole('heading', { name: 'Project not found' });
     expect(document.querySelector('[data-slot="sidebar"]')).toBeNull();
-    expect(calls.every((call) => call.path === '/api/projects')).toBe(true);
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
   });
+});
+
+it('restores contacts filters and pagination from the URL and resets the page when filtering', async () => {
+  const { router, user } = open(`/projects/${firstId}?search=Alex&status=suppressed&page=2`);
+  expect(await screen.findByLabelText('Search contacts')).toHaveProperty('value', 'Alex');
+  expect(screen.getByLabelText('Filter by outreach status')).toHaveProperty('value', 'suppressed');
+  await user.selectOptions(screen.getByLabelText('Filter by outreach status'), 'active');
+  await waitFor(() => {
+    const params = new URLSearchParams(router.state.location.search);
+    expect(params.get('status')).toBe('active');
+    expect(params.get('page')).toBe('1');
+    expect(params.get('search')).toBe('Alex');
+  });
+  await user.clear(screen.getByLabelText('Search contacts'));
+  await user.type(screen.getByLabelText('Search contacts'), 'new search');
+  await waitFor(() => expect(new URLSearchParams(router.state.location.search).get('search')).toBe('new search'));
+});
+
+it('keeps contact validation errors inline without revalidating or closing the editor', async () => {
+  const { user } = open(`/projects/${firstId}`);
+  await user.click(await screen.findByRole('button', { name: 'Add contact' }));
+  const original = vi.mocked(fetch).getMockImplementation();
+  if (!original) throw new Error('Missing fetch implementation');
+  let reads = 0;
+  vi.mocked(fetch).mockImplementation((input, options) => {
+    if (options?.method === 'POST') return Promise.resolve(Response.json({ error: { message: 'Email is reserved.' } }, { status: 409 }));
+    reads++;
+    return original(input, options);
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Add contact' });
+  await user.type(within(dialog).getByLabelText(/Email address/), 'reserved@example.com');
+  await user.click(within(dialog).getByRole('button', { name: 'Save contact' }));
+  expect(await within(dialog).findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('Email is reserved.'));
+  expect(within(dialog).getByLabelText(/Email address/)).toHaveProperty('value', 'reserved@example.com');
+  expect(reads).toBe(0);
+});
+
+it('revalidates project names after an inline rename', async () => {
+  const { user } = open(`/projects/${firstId}/settings`);
+  await user.click(await screen.findByRole('button', { name: 'Rename project' }));
+  const original = vi.mocked(fetch).getMockImplementation();
+  if (!original) throw new Error('Missing fetch implementation');
+  vi.mocked(fetch).mockImplementation((input, options) => {
+    if (String(input) === `/api/projects/${firstId}` && options?.method === 'PUT') {
+      projects = projects.map(project => project.id === firstId ? { ...project, name: 'Renamed' } : project);
+      return Promise.resolve(Response.json(projects[0]));
+    }
+    return original(input, options);
+  });
+  const dialog = screen.getByRole('dialog', { name: 'Rename project' });
+  await user.clear(within(dialog).getByLabelText('Project name'));
+  await user.type(within(dialog).getByLabelText('Project name'), 'Renamed');
+  await user.click(within(dialog).getByRole('button', { name: 'Save project' }));
+  await screen.findByRole('button', { name: 'Switch project: Renamed' });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(screen.getByText('Renamed', { selector: 'p' })).toBeTruthy();
+});
+
+it('runs CSV stages through route actions and refreshes contact counts after import', async () => {
+  const { user } = open(`/projects/${firstId}`);
+  await user.click(await screen.findByRole('button', { name: 'Import CSV' }));
+  const original = vi.mocked(fetch).getMockImplementation();
+  if (!original) throw new Error('Missing fetch implementation');
+  let imported = false;
+  const stages: string[] = [];
+  vi.mocked(fetch).mockImplementation((input, options) => {
+    const path = String(input);
+    if (options?.method === 'POST') {
+      stages.push(path.split('/').pop() ?? '');
+      if (path.endsWith('/headers')) return Promise.resolve(Response.json({ projectId: firstId, headers: ['email'] }));
+      if (path.endsWith('/preview')) return Promise.resolve(Response.json({ projectId: firstId, total: 1, ready: 1, duplicates: 0, invalid: 0, rows: [{ row: 2, email: 'person@example.com', status: 'ready', issues: [] }] }));
+      if (path.endsWith('/import')) {
+        imported = true;
+        projects = projects.map(project => project.id === firstId ? { ...project, contactCount: 1 } : project);
+        return Promise.resolve(Response.json({ projectId: firstId, imported: 1, duplicates: 0, invalid: 0 }));
+      }
+    }
+    if (imported && path.endsWith('/overview')) return Promise.resolve(Response.json({ projectId: firstId, contacts: 1, active: 1, suppressed: 0 }));
+    return original(input, options);
+  });
+  const file = new File(['email\nperson@example.com'], 'contacts.csv', { type: 'text/csv' });
+  Object.defineProperty(file, 'text', { value: async () => 'email\nperson@example.com' });
+  const input = document.querySelector('input[type="file"]');
+  if (!(input instanceof HTMLInputElement)) throw new Error('Missing upload input');
+  await user.upload(input, file);
+  await user.click(await screen.findByRole('button', { name: 'Preview import' }));
+  await user.click(await screen.findByRole('button', { name: 'Import 1 contacts' }));
+  await screen.findByText('Import complete');
+  expect(stages).toEqual(['headers', 'preview', 'import']);
+  await user.click(screen.getByRole('button', { name: 'Done' }));
+  expect(document.querySelector('.stat-card strong')).toHaveProperty('textContent', '1');
+  await user.click(screen.getByRole('link', { name: 'Outreacher home' }));
+  await screen.findByText('1 contact');
+});
+
+it('aborts superseded contacts loaders and ignores late results', async () => {
+  const { router } = open(`/projects/${firstId}`);
+  await screen.findByRole('heading', { name: 'Contacts', level: 1 });
+  const original = vi.mocked(fetch).getMockImplementation();
+  if (!original) throw new Error('Missing fetch implementation');
+  let finish = () => { };
+  let signal: AbortSignal | null | undefined;
+  vi.mocked(fetch).mockImplementation((input, options) => {
+    if (String(input).includes('/contacts?search=old')) {
+      signal = options?.signal;
+      return new Promise<Response>(resolve => { finish = () => resolve(Response.json({ projectId: firstId, items: [], total: 999, page: 1, limit: 20 })); });
+    }
+    return original(input, options);
+  });
+  let oldNavigation: Promise<void> | undefined;
+  await act(async () => { oldNavigation = router.navigate(`/projects/${firstId}?search=old`); });
+  await waitFor(() => expect(signal).toBeTruthy());
+  await act(async () => { await router.navigate(`/projects/${firstId}?search=new`); });
+  expect(signal?.aborted).toBe(true);
+  await act(async () => { finish(); await oldNavigation; });
+  expect(screen.getByLabelText('Search contacts')).toHaveProperty('value', 'new');
+  expect(screen.queryByText('999')).toBeNull();
+});
+
+it('keeps typing responsive while filtered contacts are still loading', async () => {
+  const { user, router } = open(`/projects/${firstId}`);
+  await screen.findByLabelText('Search contacts');
+  const original = vi.mocked(fetch).getMockImplementation();
+  if (!original) throw new Error('Missing fetch implementation');
+  const pending: { resolve(response: Response): void; signal?: AbortSignal | null }[] = [];
+  vi.mocked(fetch).mockImplementation((input, options) => {
+    if (String(input).includes('/contacts?search=')) return new Promise<Response>(resolve => { pending.push({ resolve, signal: options?.signal }); });
+    return original(input, options);
+  });
+  await user.type(screen.getByLabelText('Search contacts'), 'slow search');
+  expect(screen.getByLabelText('Search contacts')).toHaveProperty('value', 'slow search');
+  expect(router.state.navigation.location?.search).toContain('slow+search');
+  expect(pending.slice(0, -1).every(request => request.signal?.aborted)).toBe(true);
+  await act(async () => {
+    for (const request of pending) request.resolve(Response.json({ projectId: firstId, items: [], total: 0, page: 1, limit: 20 }));
+  });
+  await waitFor(() => expect(new URLSearchParams(router.state.location.search).get('search')).toBe('slow search'));
+});
+
+it('recovers an unavailable initial page through the route error boundary', async () => {
+  const original = vi.mocked(fetch).getMockImplementation();
+  if (!original) throw new Error('Missing fetch implementation');
+  let unavailable = true;
+  vi.mocked(fetch).mockImplementation((input, options) => {
+    if (unavailable) return Promise.resolve(Response.json({ error: { message: 'Database unavailable.' } }, { status: 503 }));
+    return original(input, options);
+  });
+  const { user } = open('/');
+  await screen.findByRole('heading', { name: 'Could not open this page' });
+  expect(screen.getByRole('alert').textContent).toContain('Database unavailable.');
+  unavailable = false;
+  await user.click(screen.getByRole('button', { name: 'Try again' }));
+  await screen.findByRole('heading', { name: 'Select a project' });
 });

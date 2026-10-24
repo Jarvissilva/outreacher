@@ -1,20 +1,18 @@
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { z } from 'zod';
+import { useRouteAction } from '@/lib/route-data';
+import type { editorLoader, action as templateAction } from '@/pages/TemplatesPage';
+import type { EmailTemplate } from '@outreacher/shared';
+import {
+  previewSchema
+} from '@outreacher/shared';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import {
-  templateSchema,
-  emailAccountSchema,
-  previewSchema,
-  contactListSchema,
-} from '@outreachit/shared';
-import type { EmailTemplate } from '@outreachit/shared';
-import { api, mutate } from '@/lib/api';
+import { useState } from 'react';
+import { Form, Link, useActionData, useLoaderData, useNavigation, useSubmit } from 'react-router';
+import { z } from 'zod';
+
+import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 export function TemplateForm({
   projectId,
   template,
@@ -22,27 +20,22 @@ export function TemplateForm({
   projectId: string;
   template?: EmailTemplate;
 }) {
-  const navigate = useNavigate();
-  const client = useQueryClient();
+  const operation = useRouteAction();
+  const data = useLoaderData<typeof editorLoader>();
   const [name, setName] = useState(template?.name ?? '');
   const [subject, setSubject] = useState(template?.subject ?? '');
   const [error, setError] = useState<unknown>();
-  const [busy, setBusy] = useState(false);
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const saved = useActionData<typeof templateAction>();
+  const busy = navigation.state !== 'idle' || operation.busy;
   const [contactId, setContactId] = useState('');
   const [recipient, setRecipient] = useState('');
   const [emailAccountId, setEmailAccountId] = useState('');
-  const accounts = useQuery({
-    queryKey: ['project', projectId, 'email-accounts'],
-    queryFn: () =>
-      api(`/projects/${projectId}/email-accounts`, z.array(emailAccountSchema)),
-  });
+  const accounts = data.accounts;
   const [preview, setPreview] = useState<z.infer<typeof previewSchema>>();
   const [status, setStatus] = useState('');
-  const contacts = useQuery({
-    queryKey: ['project', projectId, 'preview-contacts'],
-    queryFn: () =>
-      api(`/projects/${projectId}/contacts?limit=100`, contactListSchema),
-  });
+  const contacts = data.contacts;
   const editor = useEditor({
     extensions: [StarterKit.configure({ link: { openOnClick: false } })],
     content: template?.html ?? '<p>Hello {{firstName}},</p><p></p>',
@@ -55,57 +48,19 @@ export function TemplateForm({
       },
     },
   });
-  async function save() {
-    setBusy(true);
-    setError(undefined);
-    try {
-      const t = await api(
-        `/projects/${projectId}/templates${template ? `/${template.id}` : ''}`,
-        templateSchema,
-        template ? 'PUT' : 'POST',
-        { name, subject, html: editor?.getHTML() ?? '' },
-      );
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'templates'],
-      });
-      navigate(`/projects/${projectId}/templates/${t.id}`);
-      setStatus('Template saved.');
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(false);
-    }
-  }
   async function action(kind: 'preview' | 'test' | 'delete') {
     setError(undefined);
     try {
       if (kind === 'preview')
         setPreview(
-          await api(
-            `/projects/${projectId}/templates/preview`,
-            previewSchema,
-            'POST',
-            { name, subject, html: editor?.getHTML(), contactId },
-          ),
+          await operation.submit('preview', { name, subject, html: editor?.getHTML(), contactId }, previewSchema),
         );
       if (kind === 'test' && template) {
-        await api(
-          `/projects/${projectId}/email-accounts/${emailAccountId}/test`,
-          z.object({ ok: z.boolean() }),
-          'POST',
-          { recipient, contactId, templateId: template.id },
-        );
+        await operation.submit('test', { recipient, contactId, emailAccountId }, z.unknown());
         setStatus('Saved template test submitted to SMTP.');
       }
       if (kind === 'delete' && template) {
-        await mutate(
-          `/projects/${projectId}/templates/${template.id}`,
-          'DELETE',
-        );
-        await client.invalidateQueries({
-          queryKey: ['project', projectId, 'templates'],
-        });
-        navigate(`/projects/${projectId}/templates`);
+        await operation.submit('delete', {}, z.unknown());
       }
     } catch (e) {
       setError(e);
@@ -117,11 +72,12 @@ export function TemplateForm({
         <h1>{template ? 'Edit template' : 'New template'}</h1>
         <Link to={`/projects/${projectId}/templates`}>All templates</Link>
       </div>
-      <form
+      <Form method="post"
         className="grid gap-4"
         onSubmit={(e) => {
           e.preventDefault();
-          void save();
+          setError(undefined);
+          void submit(JSON.stringify({ intent: 'save', payload: { name, subject, html: editor?.getHTML() ?? '' } }), { method: 'post', encType: 'application/json' });
         }}
       >
         <label>
@@ -219,9 +175,9 @@ export function TemplateForm({
         </div>
         <EditorContent editor={editor} />
         <Button disabled={busy}>Save template</Button>
-      </form>
-      <ErrorMessage error={error} />
-      <p role="status">{status}</p>
+      </Form>
+      <ErrorMessage error={error ?? (saved && !saved.ok ? new Error(saved.error) : undefined)} />
+      <p role="status">{status || (saved?.ok ? 'Template saved.' : '')}</p>
       <section className="my-8 grid gap-3">
         <h2>Preview and test</h2>
         <label>
@@ -232,7 +188,7 @@ export function TemplateForm({
             onChange={(e) => setContactId(e.target.value)}
           >
             <option value="">Choose a contact</option>
-            {contacts.data?.items.map((c) => (
+            {contacts?.items.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.email}
               </option>
@@ -242,7 +198,7 @@ export function TemplateForm({
         <Button
           variant="outline"
           onClick={() => void action('preview')}
-          disabled={!contactId}
+          disabled={busy || !contactId}
         >
           Preview current content
         </Button>
@@ -269,14 +225,13 @@ export function TemplateForm({
             onChange={(e) => setEmailAccountId(e.target.value)}
           >
             <option value="">Choose a mail account</option>
-            {accounts.data?.map((a) => (
+            {accounts?.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name} — {a.senderEmail}
               </option>
             ))}
           </select>
         </label>
-        <ErrorMessage error={accounts.error} />
         <label>
           Explicit test recipient
           <Input
@@ -287,7 +242,7 @@ export function TemplateForm({
         </label>
         <Button
           variant="outline"
-          disabled={!template || !contactId || !recipient || !emailAccountId}
+          disabled={busy || !template || !contactId || !recipient || !emailAccountId}
           onClick={() => void action('test')}
         >
           Send saved template test
@@ -296,6 +251,7 @@ export function TemplateForm({
       {template && (
         <Button
           variant="destructive"
+          disabled={busy}
           onClick={() => {
             if (window.confirm('Delete this template?')) void action('delete');
           }}

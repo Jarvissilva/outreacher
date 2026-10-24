@@ -1,14 +1,13 @@
-import { Textarea } from '@/components/ui/textarea';
-import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { contactInputSchema } from '@outreachit/shared';
-import type { Contact, ContactInput, CustomField } from '@outreachit/shared';
-import { mutate } from '@/lib/api';
-import { invalidateProject } from '@/lib/projects';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import type { action } from '@/pages/ContactsPage';
+import { useEffect, useState } from 'react';
+import { useFetcher } from 'react-router';
+
 import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 import { Modal } from '@/components/feedback/Modal';
+import type { Contact, ContactInput, CustomField } from '@outreacher/shared';
 
 const fields = [
   ['email', 'Email address', 'email'],
@@ -34,71 +33,59 @@ export function ContactForm({
   customFields: CustomField[];
   onClose(): void;
 }) {
-  const queryClient = useQueryClient();
+  const save = useFetcher<typeof action>();
+  const busy = save.state !== 'idle';
+  useEffect(() => { if (save.state === 'idle' && save.data?.ok) onClose(); }, [save.state, save.data, onClose]);
   const [values, setValues] = useState<ContactInput>(() =>
     contact
       ? {
-          email: contact.email,
-          firstName: contact.firstName,
-          lastName: contact.lastName,
-          company: contact.company,
-          phone: contact.phone,
-          website: contact.website,
-          city: contact.city,
-          state: contact.state,
-          country: contact.country,
-          source: contact.source,
-          notes: contact.notes,
-          customFields: contact.customFields,
-          suppressed: contact.suppressed,
-        }
+        email: contact.email,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        company: contact.company,
+        phone: contact.phone,
+        website: contact.website,
+        city: contact.city,
+        state: contact.state,
+        country: contact.country,
+        source: contact.source,
+        notes: contact.notes,
+        customFields: contact.customFields,
+        suppressed: contact.suppressed,
+      }
       : {
-          email: '',
-          firstName: '',
-          lastName: '',
-          company: '',
-          phone: '',
-          website: '',
-          city: '',
-          state: '',
-          country: '',
-          source: '',
-          notes: '',
-          customFields: {},
-          suppressed: false,
-        },
+        email: '',
+        firstName: '',
+        lastName: '',
+        company: '',
+        phone: '',
+        website: '',
+        city: '',
+        state: '',
+        country: '',
+        source: '',
+        notes: '',
+        customFields: {},
+        suppressed: false,
+      },
   );
   const [email, setEmail] = useState(contact?.email ?? '');
-  const save = useMutation({
-    mutationFn: () => {
-      const input = contactInputSchema.parse({ ...values, email });
-      return mutate(
-        `/projects/${projectId}/contacts${contact ? `/${contact.id}` : ''}`,
-        contact ? 'PUT' : 'POST',
-        input,
-      );
-    },
-    onSuccess: async () => {
-      await invalidateProject(queryClient, projectId);
-      onClose();
-    },
-  });
   return (
     <Modal
       title={contact ? 'Edit contact' : 'Add contact'}
       onClose={() => {
-        if (!save.isPending) onClose();
+        if (!busy) onClose();
       }}
       wide
     >
-      <form
+      <save.Form method="post"
         onSubmit={(event) => {
           event.preventDefault();
-          save.mutate();
+          void save.submit(JSON.stringify({ intent: 'save-contact', payload: { id: contact?.id, input: { ...values, email } } }), { method: 'post', encType: 'application/json', action: `/projects/${projectId}?index` });
         }}
       >
         <div className="modal-body">
-          <ErrorMessage error={save.error} />
+          <ErrorMessage error={save.data && !save.data.ok ? new Error(save.data.error) : undefined} />
           <div className="form-grid">
             {fields.map(([key, label, type]) => (
               <label key={key}>
@@ -175,15 +162,15 @@ export function ContactForm({
             type="button"
             variant="outline"
             onClick={onClose}
-            disabled={save.isPending}
+            disabled={busy}
           >
             Cancel
           </Button>
-          <Button disabled={save.isPending}>
-            {save.isPending ? 'Saving…' : 'Save contact'}
+          <Button disabled={busy}>
+            {busy ? 'Saving…' : 'Save contact'}
           </Button>
         </div>
-      </form>
+      </save.Form>
     </Modal>
   );
 }

@@ -1,8 +1,8 @@
-import { Link, useOutletContext } from 'react-router-dom';
-import { ArrowRight, FolderOpen } from 'lucide-react';
-import type { Project } from '@outreachit/shared';
 import { Brand } from '@/components/layout/Brand';
 import { Card, CardContent } from '@/components/ui/card';
+import type { Project } from '@outreacher/shared';
+import { ArrowRight, FolderOpen } from 'lucide-react';
+import { Link, useOutletContext } from 'react-router';
 
 export function HomePage() {
   const projects = useOutletContext<Project[]>();

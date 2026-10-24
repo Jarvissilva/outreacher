@@ -1,5 +1,5 @@
 {
-  "name": "outreachit",
+  "name": "outreacher",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.22.0",
@@ -7,12 +7,12 @@
     "node": "^22.13.0 || >=24"
   },
   "scripts": {
-    "dev": "pnpm --filter @outreachit/shared build && pnpm -r --parallel dev",
+    "dev": "pnpm --filter @outreacher/shared build && pnpm -r --parallel dev",
     "build": "pnpm -r build",
-    "start": "pnpm --filter @outreachit/server start",
-    "typecheck": "pnpm --filter @outreachit/shared build && pnpm -r typecheck",
+    "start": "pnpm --filter @outreacher/server start",
+    "typecheck": "pnpm --filter @outreacher/shared build && pnpm -r typecheck",
     "lint": "eslint .",
-    "test": "pnpm --filter @outreachit/shared build && pnpm --filter @outreachit/server test && pnpm --filter @outreachit/client test"
+    "test": "pnpm --filter @outreacher/shared build && pnpm --filter @outreacher/server test && pnpm --filter @outreacher/client test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

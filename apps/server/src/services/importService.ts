@@ -1,7 +1,8 @@
 import { parse } from 'csv-parse/sync';
-import { contactInputSchema, csvColumns } from '@outreachit/shared';
-import type { ImportRequest } from '@outreachit/shared';
-import { ContactModel, FieldModel } from '../models/index.js';
+import { contactInputSchema, csvColumns } from '@outreacher/shared';
+import type { ImportRequest } from '@outreacher/shared';
+import { findExistingEmails } from '../db/repositories/contacts.js';
+import { listFields } from '../db/repositories/customFields.js';
 import { HttpError } from '../lib/HttpError.js';
 
 export function parseCsv(csv: string): {
@@ -44,7 +45,7 @@ export function parseCsv(csv: string): {
 
 export async function prepareImport(input: ImportRequest, projectId: string) {
   const { headers, records } = parseCsv(input.csv);
-  const fields = await FieldModel.find({ projectId });
+  const fields = listFields(projectId);
   const validKeys = new Set<string>([
     ...csvColumns,
     ...fields.map((field) => `custom.${field.key}`),
@@ -71,15 +72,12 @@ export async function prepareImport(input: ImportRequest, projectId: string) {
     const parsed = contactInputSchema.safeParse(values);
     return { row: index + 2, email: String(values.email ?? ''), parsed };
   });
-  const existing = await ContactModel.find({
+  const seen = findExistingEmails(
     projectId,
-    email: {
-      $in: candidates.flatMap((row) =>
-        row.parsed.success ? [row.parsed.data.email] : [],
-      ),
-    },
-  }).select('email');
-  const seen = new Set(existing.map((contact) => contact.email));
+    candidates.flatMap((row) =>
+      row.parsed.success ? [row.parsed.data.email] : [],
+    ),
+  );
   return candidates.map((candidate) => {
     if (!candidate.parsed.success) {
       return {

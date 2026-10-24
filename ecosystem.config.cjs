@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'outreachit',
+      name: 'outreacher',
       cwd: `${__dirname}/apps/server`,
       script: 'dist/index.js',
       interpreter: 'node',

@@ -1,5 +1,5 @@
-import { Navigate, useOutletContext, useParams } from 'react-router-dom';
-import type { Project } from '@outreachit/shared';
+import type { Project } from '@outreacher/shared';
+import { Navigate, useOutletContext, useParams } from 'react-router';
 
 export function LegacyRedirect({ settings = false }: { settings?: boolean }) {
   const projects = useOutletContext<Project[]>();

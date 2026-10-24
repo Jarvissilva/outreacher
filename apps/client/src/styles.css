@@ -1138,8 +1138,7 @@
     color: var(--color-muted-foreground);
   }
   .compose-envelope-row > select,
-  .compose-envelope-row > input,
-  .compose-destinations textarea {
+  .compose-envelope-row > input {
     flex: 1;
     width: 100%;
     min-width: 0;
@@ -1150,19 +1149,11 @@
     padding: 12px 0;
     font-size: 14px;
   }
-  .compose-destinations {
-    flex: 1;
-    min-width: 0;
+  .compose-to-row {
+    align-items: flex-start;
   }
-  .compose-destinations textarea {
-    min-height: 44px;
-    resize: vertical;
-  }
-  .compose-selected-contacts {
-    margin-bottom: 10px;
-    color: var(--primary);
-    font-size: 12px;
-    cursor: pointer;
+  .compose-to-row > label {
+    padding-top: 19px;
   }
   .compose-email-body {
     min-height: clamp(300px, 43vh, 520px);
@@ -1210,13 +1201,6 @@
     }
     .compose-envelope-row > label {
       flex-basis: 42px;
-    }
-    .compose-to-row {
-      flex-wrap: wrap;
-      padding-bottom: 6px;
-    }
-    .compose-to-row > button {
-      margin-left: 50px;
     }
     .compose-email-body {
       padding: 20px 14px;

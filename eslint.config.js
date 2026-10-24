@@ -21,4 +21,8 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
   },
+  {
+    files: ['apps/client/src/pages/**/*.tsx', 'apps/client/src/layouts/**/*.tsx'],
+    rules: { 'react-refresh/only-export-components': ['warn', { allowConstantExport: true, allowExportNames: ['loader', 'editorLoader', 'action', 'contactSearchLoader', 'reportLoader', 'messagesLoader', 'inboxHeadersLoader', 'inboxMessageLoader'] }] },
+  },
 );

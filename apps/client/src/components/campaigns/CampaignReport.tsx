@@ -1,15 +1,15 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useRouteAction } from '@/lib/route-data';
+import type { reportLoader } from '@/pages/CampaignsPage';
+import type { Campaign } from '@outreacher/shared';
 import {
   campaignSchema,
-  reportSchema,
   recipientStates,
-} from '@outreachit/shared';
-import type { Campaign } from '@outreachit/shared';
-import { api } from '@/lib/api';
-import { Button } from '@/components/ui/button';
+} from '@outreacher/shared';
+import { useEffect, useState } from 'react';
+import { Link, useFetcher } from 'react-router';
+
 import { ErrorMessage } from '@/components/feedback/ErrorMessage';
+import { Button } from '@/components/ui/button';
 export function CampaignReport({
   projectId,
   campaign,
@@ -17,41 +17,19 @@ export function CampaignReport({
   projectId: string;
   campaign: Campaign;
 }) {
-  const client = useQueryClient();
+  const operation = useRouteAction();
   const [state, setState] = useState('');
   const [page, setPage] = useState(1);
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
-  const query = useQuery({
-    queryKey: [
-      'project',
-      projectId,
-      'campaigns',
-      campaign.id,
-      'report',
-      state,
-      page,
-    ],
-    queryFn: () =>
-      api(
-        `/projects/${projectId}/campaigns/${campaign.id}/report?page=${page}${state ? `&state=${state}` : ''}`,
-        reportSchema,
-      ),
-    refetchInterval: 5000,
-  });
+  const query = useFetcher<typeof reportLoader>();
+  const { load } = query;
+  useEffect(() => { void load(`/projects/${projectId}/resources/campaigns/${campaign.id}/report?page=${page}${state ? `&state=${state}` : ''}`); }, [load, projectId, campaign.id, page, state]);
   async function action(action: string) {
     setError(undefined);
     setBusy(true);
     try {
-      await api(
-        `/projects/${projectId}/campaigns/${campaign.id}/${action === 'retry' ? 'launch' : action}`,
-        campaignSchema,
-        'POST',
-        action === 'retry' ? { confirmed: true, retry: true } : {},
-      );
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'campaigns'],
-      });
+      await operation.submit(action, { id: campaign.id }, campaignSchema);
     } catch (e) {
       setError(e);
     } finally {
@@ -104,7 +82,7 @@ export function CampaignReport({
           </Button>
         ))}
       </div>
-      <ErrorMessage error={error ?? query.error} />
+      <ErrorMessage error={error} />
       <h2>Sending report</h2>
       <p className="my-2 text-sm">
         SMTP accepted means the SMTP server accepted the message. Confirmed

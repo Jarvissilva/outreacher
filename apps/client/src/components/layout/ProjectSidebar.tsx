@@ -1,8 +1,3 @@
-import { NavLink } from 'react-router-dom';
-import { Settings, Users, Mail, Send } from 'lucide-react';
-import type { Project } from '@outreachit/shared';
-import { useSidebar } from '@/hooks/use-sidebar';
-import { Brand } from './Brand';
 import { ProjectSwitcher } from '@/components/projects/ProjectSwitcher';
 import {
   Sidebar,
@@ -13,6 +8,11 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from '@/components/ui/sidebar';
+import { useSidebar } from '@/hooks/use-sidebar';
+import type { Project } from '@outreacher/shared';
+import { Mail, Send, Settings, Users } from 'lucide-react';
+import { NavLink } from 'react-router';
+import { Brand } from './Brand';
 
 export function ProjectSidebar({
   project,

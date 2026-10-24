@@ -2,9 +2,32 @@ import assert from 'node:assert/strict';
 import { it, mock } from 'node:test';
 import { ImapFlow } from 'imapflow';
 import { MAX_SOURCE_BYTES, parseIncoming, validMessageId, listInbox, readInbox, createImap } from '../src/services/inboxService.js';
-import { MailAccountModel } from '../src/models/EmailModels.js';
 import { encryptPassword } from '../src/services/emailService.js';
+import type { MailAccount } from '../src/db/repositories/mailAccounts.js';
 const accountId = '111111111111111111111111', projectId = '222222222222222222222222';
+
+function account(overrides: Partial<MailAccount> = {}): MailAccount {
+  const now = new Date();
+  return {
+    id: accountId,
+    projectId,
+    name: 'Test',
+    archivedAt: null,
+    host: 'smtp.example.com',
+    port: 587,
+    tlsMode: 'starttls',
+    username: 'smtp-user',
+    passwordEncrypted: encryptPassword('smtp-secret'),
+    senderName: '',
+    senderEmail: 'sender@example.com',
+    replyTo: '',
+    incoming: null,
+    sendingError: '',
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
 it('parses MIME, rejects injection, strips remote and executable content and bounds downloads', async () => {
   const mail = await parseIncoming(Buffer.from([
     'From: Sender <from@example.com>', 'Reply-To: reply@example.com',
@@ -27,10 +50,21 @@ it('parses MIME, rejects injection, strips remote and executable content and bou
 });
 it('requires explicitly enabled incoming settings and supports encrypted separate credentials', () => {
   process.env.EMAIL_ENCRYPTION_KEY = 'a'.repeat(64);
-  const account = new MailAccountModel({ projectId, username: 'smtp-user', passwordEncrypted: encryptPassword('smtp-secret') });
-  assert.throws(() => createImap(account), /Enable incoming/);
-  account.set('incoming', { enabled: true, host: 'imap.example.com', port: 993, tlsMode: 'tls', useSmtpCredentials: false, username: 'imap-user', passwordEncrypted: encryptPassword('imap-secret') });
-  const client = createImap(account);
+  const disabled = account();
+  assert.throws(() => createImap(disabled), /Enable incoming/);
+  const client = createImap(
+    account({
+      incoming: {
+        enabled: true,
+        host: 'imap.example.com',
+        port: 993,
+        tlsMode: 'tls',
+        useSmtpCredentials: false,
+        username: 'imap-user',
+        passwordEncrypted: encryptPassword('imap-secret'),
+      },
+    }),
+  );
   client.close();
 });
 it('paginates headers newest first without fetching bodies and detects stale or missing messages', async () => {

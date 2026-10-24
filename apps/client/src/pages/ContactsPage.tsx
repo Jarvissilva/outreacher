@@ -1,99 +1,91 @@
+import { ContactForm } from '@/components/contacts/ContactForm';
+import { ImportContacts } from '@/components/contacts/ImportContacts';
+import { EmptyState } from '@/components/feedback/EmptyState';
+import { ErrorMessage } from '@/components/feedback/ErrorMessage';
+import { Modal } from '@/components/feedback/Modal';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Table,
-  TableHeader,
   TableBody,
-  TableRow,
-  TableHead,
   TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from '@/components/ui/table';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
-import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useOutletContext } from 'react-router-dom';
+import { api, mutate } from '@/lib/api';
+import { projectPath, routeOperation, useRouteAction } from '@/lib/route-data';
+import type { Contact, Project } from '@outreacher/shared';
+import { contactInputSchema, contactListSchema, csvHeadersSchema, fieldsSchema, importPreviewSchema, importRequestSchema, importResultSchema, overviewSchema } from '@outreacher/shared';
 import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
   Pencil,
-  Trash2,
   Plus,
   Search,
   SlidersHorizontal,
-  Users,
+  Trash2,
   UserCheck,
   UserMinus,
+  Users,
   X,
 } from 'lucide-react';
-import {
-  contactListSchema,
-  fieldsSchema,
-  overviewSchema,
-} from '@outreachit/shared';
-import type { Contact, Project } from '@outreachit/shared';
-import { api, mutate } from '@/lib/api';
-import { invalidateProject } from '@/lib/projects';
-import { EmptyState } from '@/components/feedback/EmptyState';
-import { ErrorMessage } from '@/components/feedback/ErrorMessage';
-import { Modal } from '@/components/feedback/Modal';
-import { ContactForm } from '@/components/contacts/ContactForm';
-import { ImportContacts } from '@/components/contacts/ImportContacts';
+import { useState } from 'react';
+import type { ActionFunctionArgs, LoaderFunctionArgs } from 'react-router';
+import { Link, useLoaderData, useLocation, useNavigation, useOutletContext, useSearchParams } from 'react-router';
+import { z } from 'zod';
 
 export function ContactsPage() {
   const { id: projectId } = useOutletContext<Project>();
-  const queryClient = useQueryClient();
-  const [search, setSearch] = useState('');
-  const [fieldKey, setFieldKey] = useState('');
-  const [fieldValue, setFieldValue] = useState('');
-  const [status, setStatus] = useState('all');
-  const [page, setPage] = useState(1);
+  const data = useLoaderData<typeof loader>();
+  const [committedParams, setParams] = useSearchParams();
+  const navigation = useNavigation();
+  const location = useLocation();
+  const params = navigation.location?.pathname === location.pathname ? new URLSearchParams(navigation.location.search) : committedParams;
+  const search = params.get('search') ?? '';
+  const fieldKey = params.get('fieldKey') ?? '';
+  const fieldValue = params.get('fieldValue') ?? '';
+  const status = params.get('status') ?? 'all';
+  const page = Math.max(1, Number(params.get('page')) || 1);
+  function filter(key: string, value: string) {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    next.set('page', '1');
+    if (key === 'fieldKey') next.delete('fieldValue');
+    setParams(next, { replace: true });
+  }
+  const setSearch = (v: string) => filter('search', v);
+  const setFieldKey = (v: string) => filter('fieldKey', v);
+  const setFieldValue = (v: string) => filter('fieldValue', v);
+  const setStatus = (v: string) => filter('status', v);
+  const setPage = (value: number) => {
+    const next = new URLSearchParams(params);
+    next.set('page', String(value));
+    setParams(next);
+  };
   const [form, setForm] = useState<{ contact?: Contact } | null>(null);
   const [importing, setImporting] = useState(false);
   const [deleting, setDeleting] = useState<Contact | null>(null);
   const [notice, setNotice] = useState('');
-  const contacts = useQuery({
-    queryKey: [
-      'project',
-      projectId,
-      'contacts',
-      search,
-      status,
-      page,
-      fieldKey,
-      fieldValue,
-    ],
-    queryFn: () =>
-      api(
-        `/projects/${projectId}/contacts?${new URLSearchParams({ search, status, page: String(page), ...(fieldKey ? { fieldKey, fieldValue } : {}) })}`,
-        contactListSchema,
-      ),
-  });
-  const fields = useQuery({
-    queryKey: ['project', projectId, 'fields'],
-    queryFn: () => api(`/projects/${projectId}/custom-fields`, fieldsSchema),
-  });
-  const overview = useQuery({
-    queryKey: ['project', projectId, 'overview'],
-    queryFn: () => api(`/projects/${projectId}/overview`, overviewSchema),
-  });
-  const remove = useMutation({
-    mutationFn: (contact: Contact) =>
-      mutate(`/projects/${projectId}/contacts/${contact.id}`, 'DELETE'),
-    onSuccess: async () => {
+  const contacts = data.contacts;
+  const fields = data.fields;
+  const overview = data.overview;
+  const remove = useRouteAction();
+  const removing = remove.busy;
+  const [removeError, setRemoveError] = useState<unknown>();
+  async function deleteContact(contact: Contact) {
+    setRemoveError(undefined);
+    try {
+      await remove.submit('delete-contact', { id: contact.id }, z.unknown());
       setDeleting(null);
       setPage(1);
-      setNotice(
-        'Contact deleted. Its email and suppression preference are preserved.',
-      );
-      await invalidateProject(queryClient, projectId);
-    },
-  });
-  const items = contacts.data?.items ?? [];
-  const total = contacts.data?.total ?? 0;
-  const resetPage = () => {
-    setPage(1);
-  };
-  const canEdit = fields.isSuccess;
+      setNotice('Contact deleted. Its email and suppression preference are preserved.');
+    } catch (e) { setRemoveError(e); }
+  }
+  const items = contacts.items ?? [];
+  const total = contacts.total ?? 0;
   const hasFilters = Boolean(search || fieldKey || status !== 'all');
 
   return (
@@ -105,13 +97,12 @@ export function ContactsPage() {
         <div className="actions">
           <Button
             variant="outline"
-            disabled={!canEdit}
             onClick={() => setImporting(true)}
           >
             <ArrowDownToLine size={16} />
             Import CSV
           </Button>
-          <Button disabled={!canEdit} onClick={() => setForm({})}>
+          <Button onClick={() => setForm({})}>
             <Plus size={17} />
             Add contact
           </Button>
@@ -121,17 +112,17 @@ export function ContactsPage() {
         {[
           {
             label: 'Total contacts',
-            value: overview.data?.contacts,
+            value: overview.contacts,
             icon: Users,
           },
           {
             label: 'Ready for outreach',
-            value: overview.data?.active,
+            value: overview.active,
             icon: UserCheck,
           },
           {
             label: 'Do not contact',
-            value: overview.data?.suppressed,
+            value: overview.suppressed,
             icon: UserMinus,
           },
         ].map(({ label, value, icon: Icon }) => (
@@ -146,7 +137,6 @@ export function ContactsPage() {
           </div>
         ))}
       </div>
-      <ErrorMessage error={contacts.error ?? fields.error ?? overview.error} />
       {notice && (
         <div className="alert success" role="status">
           <span>{notice}</span>
@@ -184,7 +174,6 @@ export function ContactsPage() {
               value={search}
               onChange={(event) => {
                 setSearch(event.target.value);
-                resetPage();
               }}
             />
           </label>
@@ -193,7 +182,6 @@ export function ContactsPage() {
             value={status}
             onChange={(event) => {
               setStatus(event.target.value);
-              resetPage();
             }}
           >
             <option value="all">All statuses</option>
@@ -201,19 +189,17 @@ export function ContactsPage() {
             <option value="suppressed">Do not contact</option>
           </select>
         </div>
-        {!!fields.data?.length && (
+        {!!fields.length && (
           <div className="toolbar custom-filter">
             <select
               aria-label="Filter by custom field"
               value={fieldKey}
               onChange={(event) => {
                 setFieldKey(event.target.value);
-                setFieldValue('');
-                resetPage();
               }}
             >
               <option value="">Any custom field</option>
-              {fields.data.map((field) => (
+              {fields.map((field) => (
                 <option value={field.key} key={field.id}>
                   {field.label}
                 </option>
@@ -226,31 +212,12 @@ export function ContactsPage() {
                 value={fieldValue}
                 onChange={(event) => {
                   setFieldValue(event.target.value);
-                  resetPage();
                 }}
               />
             )}
           </div>
         )}
-        {contacts.isPending ? (
-          <div className="loading-state" role="status">
-            Loading your contacts…
-          </div>
-        ) : contacts.isError ? (
-          <EmptyState
-            icon={<Users size={28} />}
-            title="Your contacts are unavailable"
-            description="Check the database connection, then try again."
-            action={
-              <Button
-                variant="outline"
-                onClick={() => void invalidateProject(queryClient, projectId)}
-              >
-                Try again
-              </Button>
-            }
-          />
-        ) : !items.length ? (
+        {!items.length ? (
           <EmptyState
             icon={<Users size={28} />}
             title={
@@ -266,17 +233,13 @@ export function ContactsPage() {
                 <Button
                   variant="outline"
                   onClick={() => {
-                    setSearch('');
-                    setStatus('all');
-                    setFieldKey('');
-                    setFieldValue('');
-                    resetPage();
+                    setParams({});
                   }}
                 >
                   Clear filters
                 </Button>
               ) : (
-                <Button disabled={!canEdit} onClick={() => setForm({})}>
+                <Button onClick={() => setForm({})}>
                   <Plus size={16} />
                   Add your first contact
                 </Button>
@@ -305,7 +268,6 @@ export function ContactsPage() {
                           variant="ghost"
                           className="contact-name h-auto justify-start p-0"
                           onClick={() => setForm({ contact })}
-                          disabled={!canEdit}
                         >
                           <span className="avatar">
                             {(contact.firstName || contact.email)
@@ -339,7 +301,6 @@ export function ContactsPage() {
                             variant="ghost"
                             size="icon"
                             aria-label={`Edit ${contact.email}`}
-                            disabled={!canEdit}
                             onClick={() => setForm({ contact })}
                           >
                             <Pencil size={16} />
@@ -350,7 +311,7 @@ export function ContactsPage() {
                             className="text-destructive"
                             aria-label={`Delete ${contact.email}`}
                             onClick={() => {
-                              remove.reset();
+                              setRemoveError(undefined);
                               setDeleting(contact);
                             }}
                           >
@@ -400,14 +361,14 @@ export function ContactsPage() {
         <ContactForm
           contact={form.contact}
           projectId={projectId}
-          customFields={fields.data ?? []}
+          customFields={fields}
           onClose={() => setForm(null)}
         />
       )}
       {importing && (
         <ImportContacts
           projectId={projectId}
-          customFields={fields.data ?? []}
+          customFields={fields}
           onClose={() => setImporting(false)}
         />
       )}
@@ -416,31 +377,61 @@ export function ContactsPage() {
           title="Delete contact?"
           description={`Remove ${deleting.email} from your active contacts. Its email remains reserved to prevent accidental reimport.`}
           onClose={() => {
-            if (!remove.isPending) setDeleting(null);
+            if (!removing) setDeleting(null);
           }}
         >
           <div className="modal-body">
-            <ErrorMessage error={remove.error} />
+            <ErrorMessage error={removeError} />
             <p>This contact will no longer appear in the contact list.</p>
           </div>
           <div className="modal-footer">
             <Button
               variant="outline"
-              disabled={remove.isPending}
+              disabled={removing}
               onClick={() => setDeleting(null)}
             >
               Keep contact
             </Button>
             <Button
               variant="destructive"
-              disabled={remove.isPending}
-              onClick={() => remove.mutate(deleting)}
+              disabled={removing}
+              onClick={() => void deleteContact(deleting)}
             >
-              {remove.isPending ? 'Deleting…' : 'Delete contact'}
+              {removing ? 'Deleting…' : 'Delete contact'}
             </Button>
           </div>
         </Modal>
       )}
     </>
   );
+}
+
+export async function loader({ params, request }: LoaderFunctionArgs) {
+  const base = projectPath(params.projectId);
+  const query = new URL(request.url).searchParams;
+  const [contacts, fields, overview] = await Promise.all([
+    api(`${base}/contacts?${query}`, contactListSchema, 'GET', undefined, request.signal),
+    api(`${base}/custom-fields`, fieldsSchema, 'GET', undefined, request.signal),
+    api(`${base}/overview`, overviewSchema, 'GET', undefined, request.signal),
+  ]);
+  return { contacts, fields, overview };
+}
+export function contactSearchLoader({ params, request }: LoaderFunctionArgs) {
+  return api(`${projectPath(params.projectId)}/contacts?${new URL(request.url).searchParams}`, contactListSchema, 'GET', undefined, request.signal);
+}
+export async function action({ params, request }: ActionFunctionArgs) {
+  return routeOperation(request, async ({ intent, payload }) => {
+    const kind = z.enum(['save-contact', 'delete-contact', 'import-headers', 'import-preview', 'import-commit']).parse(intent);
+    const base = `${projectPath(params.projectId)}/contacts`;
+    if (kind === 'delete-contact') { const { id } = z.object({ id: z.string().min(1) }).parse(payload); return mutate(`${base}/${id}`, 'DELETE', undefined, request.signal); }
+    if (kind === 'save-contact') {
+      const { id, input } = z.object({ id: z.string().optional(), input: contactInputSchema }).parse(payload);
+      return mutate(`${base}${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', input, request.signal);
+    }
+    if (kind === 'import-headers') return api(`${base}/import/headers`, csvHeadersSchema, 'POST', z.object({ csv: z.string() }).parse(payload), request.signal);
+    const input = importRequestSchema.parse(payload);
+    return kind === 'import-preview'
+      ? api(`${base}/import/preview`, importPreviewSchema, 'POST', input, request.signal)
+      : api(`${base}/import`, importResultSchema, 'POST', input, request.signal);
+  });
 }

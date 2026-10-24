@@ -1,26 +1,25 @@
+import { ErrorMessage } from '@/components/feedback/ErrorMessage';
+import { Modal } from '@/components/feedback/Modal';
+import { Button } from '@/components/ui/button';
 import {
   Table,
-  TableHeader,
   TableBody,
-  TableRow,
-  TableHead,
   TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from '@/components/ui/table';
-import { Button } from '@/components/ui/button';
-import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Upload, CheckCircle2 } from 'lucide-react';
+import { useRouteAction } from '@/lib/route-data';
+import type { CustomField } from '@outreacher/shared';
 import {
   csvColumns,
   csvHeadersSchema,
   importPreviewSchema,
   importResultSchema,
-} from '@outreachit/shared';
-import type { CustomField } from '@outreachit/shared';
-import { api } from '@/lib/api';
-import { invalidateProject } from '@/lib/projects';
-import { ErrorMessage } from '@/components/feedback/ErrorMessage';
-import { Modal } from '@/components/feedback/Modal';
+} from '@outreacher/shared';
+import { CheckCircle2, Upload } from 'lucide-react';
+import { useState } from 'react';
+import { z } from 'zod';
 
 export function ImportContacts({
   projectId,
@@ -31,7 +30,11 @@ export function ImportContacts({
   customFields: CustomField[];
   onClose(): void;
 }) {
-  const queryClient = useQueryClient();
+  const operation = useRouteAction(`/projects/${projectId}?index`);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState<unknown>();
+  const [preview, setPreview] = useState<z.infer<typeof importPreviewSchema>>();
+  const [result, setResult] = useState<z.infer<typeof importResultSchema>>();
   const [csv, setCsv] = useState('');
   const [filename, setFilename] = useState('');
   const [headers, setHeaders] = useState<string[]>([]);
@@ -48,81 +51,46 @@ export function ImportContacts({
       label: field.label,
     })),
   ];
-  const preview = useMutation({
-    mutationFn: () =>
-      api(
-        `/projects/${projectId}/contacts/import/preview`,
-        importPreviewSchema,
-        'POST',
-        {
-          csv,
-          mapping,
-        },
-      ),
-  });
-  const upload = useMutation({
-    mutationFn: async (file: File) => {
-      if (file.size > 1_000_000)
-        throw new Error('Choose a CSV smaller than 1 MB.');
+  async function upload(file: File) {
+    setBusy('upload'); setError(undefined); setPreview(undefined); setHeaders([]); setCsv('');
+    try {
+      if (file.size > 1_000_000) throw new Error('Choose a CSV smaller than 1 MB.');
       const text = await file.text();
-      const data = await api(
-        `/projects/${projectId}/contacts/import/headers`,
-        csvHeadersSchema,
-        'POST',
-        { csv: text },
-      );
-      return { text, headers: data.headers, name: file.name };
-    },
-    onSuccess: (data) => {
-      setCsv(data.text);
-      setHeaders(data.headers);
-      setFilename(data.name);
+      const data = await operation.submit('import-headers', { csv: text }, csvHeadersSchema);
+      setCsv(text); setHeaders(data.headers); setFilename(file.name);
       const autoMapping: Record<string, string> = {};
       for (const column of columns) {
-        const match = data.headers.find(
-          (header) =>
-            header.toLowerCase().replace(/[\s_-]/g, '') ===
-            column.key.replace('custom.', '').toLowerCase(),
-        );
+        const match = data.headers.find(header => header.toLowerCase().replace(/[\s_-]/g, '') === column.key.replace('custom.', '').toLowerCase());
         if (match) autoMapping[column.key] = match;
       }
       setMapping(autoMapping);
-      preview.reset();
-    },
-  });
-  const commit = useMutation({
-    mutationFn: () =>
-      api(
-        `/projects/${projectId}/contacts/import`,
-        importResultSchema,
-        'POST',
-        {
-          csv,
-          mapping,
-        },
-      ),
-    onSuccess: async () => {
-      await invalidateProject(queryClient, projectId);
-    },
-  });
+    } catch (e) { setError(e); } finally { setBusy(''); }
+  }
+  async function run(commit: boolean) {
+    setBusy(commit ? 'commit' : 'preview'); setError(undefined);
+    try {
+      if (commit) setResult(await operation.submit('import-commit', { csv, mapping }, importResultSchema));
+      else setPreview(await operation.submit('import-preview', { csv, mapping }, importPreviewSchema));
+    } catch (e) { setError(e); } finally { setBusy(''); }
+  }
   return (
     <Modal
       title="Import contacts"
       description="Map your columns, review the results, then import."
       onClose={() => {
-        if (!commit.isPending) onClose();
+        if (!(busy === 'commit')) onClose();
       }}
       wide
     >
       <div className="modal-body">
-        <ErrorMessage error={upload.error ?? preview.error ?? commit.error} />
-        {commit.isSuccess ? (
+        <ErrorMessage error={error} />
+        {result ? (
           <div className="import-success">
             <CheckCircle2 size={36} />
             <h3>Import complete</h3>
             <p>
-              {commit.data.imported} added · {commit.data.duplicates} duplicates
-              skipped · {commit.data.invalid} invalid rows skipped
+              {result.imported} added · {result.duplicates} duplicates
+              skipped · {result.invalid} invalid rows skipped
             </p>
           </div>
         ) : (
@@ -135,20 +103,20 @@ export function ImportContacts({
                 type="file"
                 accept=".csv,text/csv"
                 disabled={
-                  upload.isPending || preview.isPending || commit.isPending
+                  (busy === 'upload') || (busy === 'preview') || (busy === 'commit')
                 }
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) {
-                    preview.reset();
+                    setPreview(undefined);
                     setHeaders([]);
                     setCsv('');
-                    upload.mutate(file);
+                    void upload(file);
                   }
                 }}
               />
             </label>
-            {upload.isPending && (
+            {(busy === 'upload') && (
               <p className="muted" role="status">
                 Reading file…
               </p>
@@ -163,14 +131,14 @@ export function ImportContacts({
                       {column.key === 'email' && ' *'}
                       <select
                         value={mapping[column.key] ?? ''}
-                        disabled={preview.isPending || commit.isPending}
+                        disabled={(busy === 'preview') || (busy === 'commit')}
                         onChange={(event) => {
                           const next = { ...mapping };
                           if (event.target.value)
                             next[column.key] = event.target.value;
                           else delete next[column.key];
                           setMapping(next);
-                          preview.reset();
+                          setPreview(undefined);
                         }}
                       >
                         <option value="">Do not import</option>
@@ -183,12 +151,12 @@ export function ImportContacts({
                 </div>
               </>
             )}
-            {preview.data && (
+            {preview && (
               <div className="import-preview">
                 <h3>Review your import</h3>
                 <p>
-                  {preview.data.ready} ready · {preview.data.duplicates}{' '}
-                  duplicates · {preview.data.invalid} invalid
+                  {preview.ready} ready · {preview.duplicates}{' '}
+                  duplicates · {preview.invalid} invalid
                 </p>
                 <p className="muted">
                   Existing contacts, including deleted or suppressed emails, are
@@ -204,7 +172,7 @@ export function ImportContacts({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {preview.data.rows.map((row) => (
+                      {preview.rows.map((row) => (
                         <TableRow key={row.row}>
                           <TableCell>{row.row}</TableCell>
                           <TableCell>{row.email || '—'}</TableCell>
@@ -225,9 +193,9 @@ export function ImportContacts({
                     </TableBody>
                   </Table>
                 </div>
-                {preview.data.total > 50 && (
+                {preview.total > 50 && (
                   <p className="muted">
-                    Showing the first 50 rows of {preview.data.total}.
+                    Showing the first 50 rows of {preview.total}.
                   </p>
                 )}
               </div>
@@ -236,27 +204,27 @@ export function ImportContacts({
         )}
       </div>
       <div className="modal-footer">
-        <Button variant="outline" onClick={onClose} disabled={commit.isPending}>
-          {commit.isSuccess ? 'Done' : 'Cancel'}
+        <Button variant="outline" onClick={onClose} disabled={(busy === 'commit')}>
+          {result ? 'Done' : 'Cancel'}
         </Button>
-        {!commit.isSuccess &&
-          (preview.data ? (
+        {!result &&
+          (preview ? (
             <Button
-              disabled={!preview.data.ready || commit.isPending}
-              onClick={() => commit.mutate()}
+              disabled={!preview.ready || (busy === 'commit')}
+              onClick={() => void run(true)}
             >
-              {commit.isPending
+              {(busy === 'commit')
                 ? 'Importing…'
-                : `Import ${preview.data.ready} contacts`}
+                : `Import ${preview.ready} contacts`}
             </Button>
           ) : (
             <Button
               disabled={
-                !mapping.email || !csv || preview.isPending || upload.isPending
+                !mapping.email || !csv || (busy === 'preview') || (busy === 'upload')
               }
-              onClick={() => preview.mutate()}
+              onClick={() => void run(false)}
             >
-              {preview.isPending ? 'Checking…' : 'Preview import'}
+              {(busy === 'preview') ? 'Checking…' : 'Preview import'}
             </Button>
           ))}
       </div>

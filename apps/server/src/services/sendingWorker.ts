@@ -1,27 +1,58 @@
-import { randomUUID } from 'node:crypto';
 import type Mail from 'nodemailer/lib/mailer/index.js';
 import {
-  CampaignModel,
-  MessageModel,
-  MailAccountModel,
-  RecipientJobModel,
-} from '../models/EmailModels.js';
-import { ContactModel, ProjectModel } from '../models/index.js';
+  activateScheduledCampaigns,
+  campaignExists,
+  completeCampaign,
+  listActiveCampaigns,
+  markCampaignStarted,
+  pauseCampaign,
+  pauseCampaignsForAccount,
+  recoverInterruptedCampaigns,
+} from '../db/repositories/campaigns.js';
+import type { Campaign } from '../db/repositories/campaigns.js';
+import {
+  completeMessage,
+  listActiveMessages,
+  markMessageStarted,
+  messageExists,
+  pauseMessage,
+  pauseMessagesForAccount,
+  recoverInterruptedMessages,
+  findMessage,
+} from '../db/repositories/messages.js';
+import type { Message } from '../db/repositories/messages.js';
+import { findAccount, setAccountSendingError } from '../db/repositories/mailAccounts.js';
+import { findProject, reserveSendSlot } from '../db/repositories/projects.js';
+import { findActiveContactByDestination } from '../db/repositories/contacts.js';
+import {
+  beginJobSend,
+  claimNextJob,
+  finishJobSend,
+  hasLiveJobs,
+  heartbeatJob,
+  nextQueuedJob,
+  requeueClaimedJob,
+  skipClaimedJob,
+  sweepStaleClaimedJobs,
+  sweepStaleSendingJobs,
+  cancelSendingJob,
+} from '../db/repositories/jobs.js';
+import type { JobSource, RecipientState } from '../db/repositories/jobs.js';
 import {
   classifySmtpError,
   createTransport,
   getMailAccount,
 } from './emailService.js';
 import { inSendingWindow } from './campaignService.js';
+
 export type MailSender = (
   projectId: string,
   message: Mail.Options,
   accountId: string,
 ) => Promise<void>;
+
 const smtpSend: MailSender = async (projectId, message, accountId) => {
-  const transport = createTransport(
-    await getMailAccount(projectId, accountId),
-  );
+  const transport = createTransport(await getMailAccount(projectId, accountId));
   try {
     const info = await transport.sendMail(message);
     if (!info.accepted.length)
@@ -30,243 +61,209 @@ const smtpSend: MailSender = async (projectId, message, accountId) => {
     transport.close();
   }
 };
+
+type Source =
+  | { source: Campaign; standalone: false }
+  | { source: Message; standalone: true };
+
+function jobSource(entry: Source): JobSource {
+  const { source } = entry;
+  return {
+    projectId: source.projectId,
+    ...(entry.standalone
+      ? { messageId: source.id }
+      : { campaignId: source.id }),
+    preparationToken: source.preparationToken ?? '',
+  };
+}
+
+function sourceIsActive(entry: Source, projectId: string): boolean {
+  return entry.standalone
+    ? messageExists(projectId, entry.source.id, 'active')
+    : campaignExists(projectId, entry.source.id, 'active');
+}
+
+function sourceIsCancelled(entry: Source, projectId: string): boolean {
+  return entry.standalone
+    ? messageExists(projectId, entry.source.id, 'cancelled')
+    : campaignExists(projectId, entry.source.id, 'cancelled');
+}
+
+function markStarted(entry: Source, now: Date): boolean {
+  return entry.standalone
+    ? markMessageStarted(entry.source.projectId, entry.source.id, now)
+    : markCampaignStarted(entry.source.projectId, entry.source.id, now);
+}
+
+function completeSource(entry: Source): void {
+  if (entry.standalone) completeMessage(entry.source.projectId, entry.source.id);
+  else completeCampaign(entry.source.projectId, entry.source.id);
+}
+
+function pauseSource(entry: Source, error: string): void {
+  if (entry.standalone)
+    pauseMessage(entry.source.projectId, entry.source.id, error);
+  else pauseCampaign(entry.source.projectId, entry.source.id, error);
+}
+
 export async function workerTick(
   send: MailSender = smtpSend,
   now = new Date(),
 ) {
-  for (const model of [CampaignModel, MessageModel]) await model.updateMany(
-    { state: 'preparing', preparationUntil: { $lt: now } },
-    {
-      $set: {
-        state: 'preparation_failed',
-        error: 'Preparation interrupted. Explicit retry required.',
-      },
-    },
+  recoverInterruptedCampaigns(now);
+  recoverInterruptedMessages(now);
+  sweepStaleClaimedJobs(now);
+  sweepStaleSendingJobs(
+    now,
+    'Worker interrupted during SMTP submission; do not automatically resend.',
   );
-  await RecipientJobModel.updateMany(
-    { state: 'claimed', leaseUntil: { $lt: now } },
-    { $set: { state: 'queued' } },
-  );
-  await RecipientJobModel.updateMany(
-    { state: 'sending', leaseUntil: { $lt: now } },
-    {
-      $set: {
-        state: 'outcome_unknown',
-        reason:
-          'Worker interrupted during SMTP submission; do not automatically resend.',
-      },
-      $push: {
-        attempts: {
-          at: now,
-          state: 'outcome_unknown',
-          reason: 'SMTP acceptance unknown.',
-        },
-      },
-    },
-  );
-  await CampaignModel.updateMany(
-    { state: 'scheduled', scheduledAt: { $lte: now } },
-    { $set: { state: 'active' } },
-  );
-  const sources = [
-    ...(await CampaignModel.find({ state: 'active' })).map(c => ({ c, standalone: false })),
-    ...(await MessageModel.find({ state: 'active' })).map(c => ({ c, standalone: true })),
+  activateScheduledCampaigns(now);
+  const sources: Source[] = [
+    ...listActiveCampaigns().map(
+      (source): Source => ({ source, standalone: false }),
+    ),
+    ...listActiveMessages().map(
+      (source): Source => ({ source, standalone: true }),
+    ),
   ];
-  const due = await Promise.all(sources.map(async source => {
-    const job = await RecipientJobModel.findOne({ projectId: source.c.projectId,
-      ...(source.standalone ? { messageId: source.c._id } : { campaignId: source.c._id }),
-      preparationToken: source.c.preparationToken, state: 'queued' }).sort({ availableAt: 1, _id: 1 });
-    return { ...source, due: job?.availableAt.getTime() ?? Infinity };
-  }));
-  due.sort((a, b) => a.due - b.due);
-  for (const { c, standalone } of due) {
-    const model = standalone ? MessageModel : CampaignModel;
-    const owner = standalone ? { messageId: c._id } : { campaignId: c._id };
+  const due = sources
+    .map((entry) => {
+      const job = nextQueuedJob(
+        jobSource(entry),
+        new Date('9999-12-31T23:59:59.999Z'),
+      );
+      return {
+        entry,
+        due: job?.availableAt.getTime() ?? Infinity,
+        createdAt: job?.createdAt.getTime() ?? Infinity,
+      };
+    })
+    .sort((a, b) => a.due - b.due || a.createdAt - b.createdAt);
+  for (const { entry } of due) {
+    const { source } = entry;
+    const projectId = source.projectId;
     const claimTime = new Date(Math.max(now.getTime(), Date.now()));
-    if (!inSendingWindow(c, claimTime)) continue;
-    const projectId = String(c.projectId);
-    const token = randomUUID();
-    const job = await RecipientJobModel.findOneAndUpdate(
-      {
-        projectId,
-        ...owner,
-        preparationToken: c.preparationToken,
-        state: 'queued',
-        availableAt: { $lte: claimTime },
-      },
-      {
-        $set: {
-          state: 'claimed',
-          leaseToken: token,
-          leaseUntil: new Date(claimTime.getTime() + 90000),
-        },
-      },
-      { returnDocument: 'after', sort: { availableAt: 1, _id: 1 } },
+    if (!inSendingWindow(source, claimTime)) continue;
+    const target = jobSource(entry);
+    const job = claimNextJob(
+      target,
+      claimTime,
+      new Date(claimTime.getTime() + 90000),
     );
     if (!job) {
-      if (
-        !(await RecipientJobModel.exists({
-          projectId,
-          ...owner,
-          preparationToken: c.preparationToken,
-          state: { $in: ['queued', 'claimed', 'sending'] },
-        }))
-      )
-        await model.updateOne(
-          { _id: c._id, projectId, state: 'active' },
-          { $set: { state: 'completed' } },
-        );
+      if (!hasLiveJobs(target)) completeSource(entry);
       continue;
     }
-    const owned = {
-      _id: job._id,
-      projectId,
-      state: 'claimed',
-      leaseToken: token,
-    };
-    const reply = standalone ? await MessageModel.findOne({ _id: c._id, projectId, kind: 'reply' }) : null;
-    const validReply = Boolean(reply?.replyContext && String(reply.replyContext.accountId) === String(c.emailAccountId) &&
-      reply.replyContext.recipient === job.email && !job.contactId);
-    const contact = job.contactId ? await ContactModel.findOne({
-      _id: job.contactId,
-      projectId,
-      deletedAt: null,
-      suppressed: false,
-      email: job.email,
-    }) : null;
-    if ((!contact && !validReply) || !(await ProjectModel.exists({ _id: projectId }))) {
-      await RecipientJobModel.updateOne(owned, {
-        $set: {
-          state: 'skipped',
-          reason:
-            'Contact deleted, suppressed, moved or destination email changed.',
-        },
-      });
-      continue;
-    }
-    const account = c.emailAccountId
-      ? await MailAccountModel.findOne({
-          _id: c.emailAccountId,
-          projectId,
-          archivedAt: null,
-        })
+    const token = job.leaseToken;
+    if (!token) continue;
+    const reply = entry.standalone
+      ? findMessage(projectId, source.id)
+      : undefined;
+    const validReply = Boolean(
+      reply?.replyContext &&
+        reply.replyContext.accountId === source.emailAccountId &&
+        reply.replyContext.recipient === job.email &&
+        !job.contactId,
+    );
+    const contact = job.contactId
+      ? findActiveContactByDestination(projectId, job.contactId, job.email)
       : null;
-    const settings = await ProjectModel.findById(projectId);
-    if (!settings || !account || account.sendingError) {
-      await model.updateOne(
-        { _id: c._id, projectId, state: 'active' },
-        {
-          $set: {
-            state: 'paused',
-            error:
-              account?.sendingError ||
-              'SMTP settings are missing. Configure email settings before resuming.',
-          },
-        },
+    if ((!contact && !validReply) || !findProject(projectId)) {
+      skipClaimedJob(
+        job.id,
+        token,
+        'Contact deleted, suppressed, moved or destination email changed.',
       );
-      await RecipientJobModel.updateOne(owned, { $set: { state: 'queued' } });
+      continue;
+    }
+    const account = source.emailAccountId
+      ? findAccount(projectId, source.emailAccountId)
+      : null;
+    const settings = findProject(projectId);
+    if (!settings || !account || account.sendingError) {
+      pauseSource(
+        entry,
+        account?.sendingError ||
+          'SMTP settings are missing. Configure email settings before resuming.',
+      );
+      requeueClaimedJob(job.id, token);
       continue;
     }
     if (
-      !inSendingWindow(c, new Date(Math.max(now.getTime(), Date.now()))) ||
-      !(await model.exists({ _id: c._id, projectId, state: 'active' }))
+      !inSendingWindow(source, new Date(Math.max(now.getTime(), Date.now()))) ||
+      !sourceIsActive(entry, projectId)
     ) {
-      await RecipientJobModel.updateOne(owned, { $set: { state: 'queued' } });
+      requeueClaimedJob(job.id, token);
       continue;
     }
-    const reserved = await ProjectModel.findOneAndUpdate(
-      {
-        _id: settings._id,
-        nextSendAt: { $lte: claimTime },
-      },
-      {
-        $set: {
-          nextSendAt: new Date(
-            claimTime.getTime() +
-              Math.ceil(3600000 / (settings.hourlyLimit ?? 60)),
-          ),
-        },
-      },
+    const reserved = reserveSendSlot(
+      projectId,
+      claimTime,
+      new Date(
+        claimTime.getTime() + Math.ceil(3600000 / (settings.hourlyLimit ?? 60)),
+      ),
     );
     if (!reserved) {
-      await RecipientJobModel.updateOne(owned, { $set: { state: 'queued' } });
+      requeueClaimedJob(job.id, token);
       continue;
     }
     // This durable transition is the SMTP submission boundary. A crash after it is ambiguous.
     if (
-      !inSendingWindow(c, new Date(Math.max(now.getTime(), Date.now()))) ||
-      !(await model.exists({
-        _id: c._id,
-        projectId,
-        state: 'active',
-      })) ||
-      (!validReply && !(await ContactModel.exists({
-        _id: job.contactId,
-        projectId,
-        deletedAt: null,
-        suppressed: false,
-        email: job.email,
-      })))
+      !inSendingWindow(source, new Date(Math.max(now.getTime(), Date.now()))) ||
+      !sourceIsActive(entry, projectId) ||
+      (!validReply &&
+        !(job.contactId
+          ? findActiveContactByDestination(projectId, job.contactId, job.email)
+          : undefined))
     ) {
-      await RecipientJobModel.updateOne(owned, { $set: { state: 'queued' } });
+      requeueClaimedJob(job.id, token);
       continue;
     }
-    const begun = await RecipientJobModel.updateOne(owned, {
-      $set: { state: 'sending', leaseUntil: new Date(Date.now() + 90000) },
-      $push: { attempts: { at: now, state: 'sending', reason: '' } },
-    });
-    if (!begun.modifiedCount) continue;
-    const permitted = await model.updateOne(
-      { _id: c._id, projectId, state: 'active' },
-      { $set: { startedAt: c.startedAt ?? now } },
-      {},
-    );
-    if (!permitted.matchedCount) {
-      const cancelled = await model.exists({
-        _id: c._id,
-        projectId,
-        state: 'cancelled',
-      });
-      await RecipientJobModel.updateOne(
-        { _id: job._id, state: 'sending', leaseToken: token },
-        {
-          $set: {
-            state: cancelled ? 'skipped' : 'queued',
-            reason: cancelled ? 'Campaign cancelled.' : '',
-          },
-          $pop: { attempts: 1 },
-        },
-      );
+    if (
+      !beginJobSend(
+        job.id,
+        token,
+        now,
+        new Date(Date.now() + 90000),
+      )
+    )
+      continue;
+    if (!markStarted(entry, now)) {
+      cancelSendingJob(job.id, token, sourceIsCancelled(entry, projectId));
       continue;
     }
     const heartbeat = setInterval(() => {
-      void RecipientJobModel.updateOne(
-        { _id: job._id, state: 'sending', leaseToken: token },
-        { $set: { leaseUntil: new Date(Date.now() + 90000) } },
-      ).catch(() => {});
+      heartbeatJob(job.id, token, new Date(Date.now() + 90000));
     }, 20000);
-    let state = 'smtp_accepted';
+    let state: RecipientState = 'smtp_accepted';
     let reason = '';
     let pause = false;
     try {
       await send(
         projectId,
         {
-          from: { name: c.senderName ?? '', address: c.senderEmail ?? '' },
+          from: {
+            name: source.senderName ?? '',
+            address: source.senderEmail ?? '',
+          },
           to: job.email,
-          ...(c.replyTo ? { replyTo: c.replyTo } : {}),
+          ...(source.replyTo ? { replyTo: source.replyTo } : {}),
           subject: job.subject ?? '',
           html: job.html ?? '',
           text: job.text ?? '',
-          ...(validReply ? { inReplyTo: job.inReplyTo || undefined, references: job.references } : {}),
-          headers: validReply ? {} : {
-            'List-Unsubscribe': `<${job.unsubscribeUrl}>`,
-            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-          },
+          ...(validReply
+            ? { inReplyTo: job.inReplyTo || undefined, references: job.references }
+            : {}),
+          headers: validReply
+            ? {}
+            : {
+                'List-Unsubscribe': `<${job.unsubscribeUrl}>`,
+                'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+              },
           disableFileAccess: true,
           disableUrlAccess: true,
         },
-        String(account._id),
+        account.id,
       );
     } catch (error) {
       const failure = classifySmtpError(error);
@@ -276,40 +273,34 @@ export async function workerTick(
         failure.kind === 'unknown'
           ? 'outcome_unknown'
           : (failure.kind === 'temporary' &&
-                job.attempts.filter((a) => a.state === 'sending').length < 3) ||
+                job.attempts.filter((attempt) => attempt.state === 'sending')
+                  .length < 3) ||
               pause
             ? 'queued'
             : 'failed';
     } finally {
       clearInterval(heartbeat);
     }
-    await RecipientJobModel.updateOne(
-      { _id: job._id, state: 'sending', leaseToken: token },
-      {
-        $set: {
-          state,
-          reason,
-          availableAt: new Date(
-            now.getTime() +
-              60000 *
-                2 ** job.attempts.filter((a) => a.state === 'sending').length,
-          ),
-        },
-        $push: { attempts: { at: new Date(), state, reason } },
-      },
-    );
+    finishJobSend(job.id, token, {
+      state,
+      reason,
+      availableAt: new Date(
+        now.getTime() +
+          60000 *
+            2 **
+              job.attempts.filter((attempt) => attempt.state === 'sending')
+                .length,
+      ),
+      attempt: { at: new Date(), state, reason },
+    });
     if (pause) {
-      await MailAccountModel.updateOne(
-        { projectId, _id: account._id },
-        { $set: { sendingError: reason } },
-      );
-      for (const affected of [CampaignModel, MessageModel]) await affected.updateMany(
-        { projectId, emailAccountId: account._id, state: 'active' },
-        { $set: { state: 'paused', error: reason } },
-      );
+      setAccountSendingError(projectId, account.id, reason);
+      pauseCampaignsForAccount(projectId, account.id, reason);
+      pauseMessagesForAccount(projectId, account.id, reason);
     }
   }
 }
+
 export function startSendingWorker() {
   let running = false;
   const timer = setInterval(() => {

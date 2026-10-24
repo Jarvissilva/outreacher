@@ -1,15 +1,21 @@
-import mongoose from 'mongoose';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
+import {
+  closeDatabase,
+  isDatabaseReady,
+  openDatabase,
+} from '../db/database.js';
 
-mongoose.set('bufferCommands', false);
-// The startup migration creates scoped indexes before removing legacy indexes.
-mongoose.set('autoIndex', false);
-
-export async function connectDatabase(
-  uri = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017/outreachit',
-) {
-  await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
+export function databasePath() {
+  if (process.env.DATABASE_PATH) return resolve(process.env.DATABASE_PATH);
+  const dataDir = resolve(
+    process.env.DATA_DIR ?? resolve(homedir(), '.local', 'share', 'outreacher'),
+  );
+  return resolve(dataDir, 'outreacher.sqlite');
 }
 
-export async function disconnectDatabase() {
-  await mongoose.disconnect();
+export function connectDatabase() {
+  return openDatabase(databasePath());
 }
+
+export { closeDatabase, isDatabaseReady };

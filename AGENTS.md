@@ -1,8 +1,8 @@
-# OutreachIt — Agent Instructions
+# Outreacher — Agent Instructions
 
 ## Project intent
 
-OutreachIt is an open-source, self-hosted outreach manager that anyone should be
+Outreacher is an open-source, self-hosted outreach manager that anyone should be
 able to clone, configure, and run for themselves. Keep it generic across people
 and businesses. Email is the first outreach channel.
 
@@ -10,7 +10,7 @@ Planned features include contacts, custom contact fields, templates,
 campaigns, scheduling, and sending analytics. These are product direction, not
 permission to implement additional features outside the requested task.
 
-The current project implements MongoDB-backed projects, contacts, custom text fields,
+The current project implements SQLite-backed projects, contacts, custom text fields,
 CSV imports, templates, campaigns, standalone Compose, scheduling, and SMTP sending with multiple mail accounts.
 The initial product is a local internal tool
 without authentication; do not introduce accounts or multi-tenancy unless asked.
@@ -22,10 +22,10 @@ without authentication; do not introduce accounts or multi-tenancy unless asked.
   React Router in `router.tsx`, separate layouts and pages, feature components, and
   shadcn/ui primitives in `components/ui/`.
 - `apps/server`: Node.js + Express API. Keep database access, credentials, email
-  sending, and background jobs on the server. MongoDB is the database. Organize
-  Mongoose schemas in `models/`, HTTP handlers in `controllers/`, endpoint wiring in
-  `routes/`, reusable workflow logic in `services/`, and middleware/config/migrations
-  in their corresponding folders.
+  sending, and background jobs on the server. SQLite is the database. Organize the
+  schema and repositories in `db/`, HTTP handlers in `controllers/`, endpoint wiring
+  in `routes/`, reusable workflow logic in `services/`, and middleware/config in
+  their corresponding folders.
 - `packages/shared`: contracts, validation, and utilities needed by both apps.
   Keep this package independent of either app and free of server-only secrets
   and dependencies.
@@ -59,15 +59,15 @@ without authentication; do not introduce accounts or multi-tenancy unless asked.
 - Contacts, custom fields, imports, counts, suppression, and deleted-email reservations
   belong to a required project. Scope every lookup and mutation to its project.
 - Emails and custom-field keys are unique within a project. Project names are unique
-  ignoring case. Tags are no longer an active feature; startup migration removes
-  legacy tags and contact tagIds.
-- Run the idempotent project and mail-account migrations before accepting requests
-  or starting workers. Stop previous servers/workers before upgrading. Mail accounts
-  live in mailaccounts; hourlyLimit, timeZone, and nextSendAt live on Project. Verify
-  migrated data before dropping emailsettings and projectemailsettings; fail startup
-  on conflicts. Preserve account IDs, ciphertext, campaign references, snapshots,
-  queue states, attempts, suppression, and deleted-email reservations. Keep encryption
-  keys unchanged. Require an explicit account for campaign saves and test sends.
+  ignoring case. Tags are not an active feature.
+- Open and initialize the SQLite database before accepting requests or starting
+  workers. Stop previous servers/workers before upgrading. Mail accounts live in
+  `mail_accounts`; hourlyLimit, timeZone, and nextSendAt live on projects. Keep
+  encryption keys and existing IDs stable. Require an explicit account for campaign
+  saves and test sends. Run one API process per database file.
+- Store timestamps as UTC ISO text and structured values as JSON text in SQLite.
+  Enforce per-project uniqueness, recipient ownership, and claims in SQL and the
+  repositories. Do not add Mongo-specific dependencies or a MongoDB importer.
 - Campaigns can use a saved template or store their own subject and HTML message.
   Require exactly one content source. Reuse the same validation, sanitization,
   personalization, and unsubscribe behavior for preview and launch; never create
@@ -79,11 +79,11 @@ without authentication; do not introduce accounts or multi-tenancy unless asked.
   create missing contacts on confirmation without restoring or overwriting existing ones.
   Freeze sender, addresses and personalized content before activation. Campaign and message
   jobs share worker claims, rate reservations, attempts and conservative crash recovery.
-  Each job belongs to exactly one source. Run the restart-safe partial recipient-index
-  migration before requests/workers, with older processes stopped. Interrupted preparation
-  requires explicit retry; unknown SMTP outcomes never automatically resend. Cancellation
+  Each job belongs to exactly one source. Partial unique recipient indexes are part of
+  schema setup and run before requests/workers. Interrupted preparation requires
+  explicit retry; unknown SMTP outcomes never automatically resend. Cancellation
   preserves in-flight outcomes, and account removal must respect unfinished messages.
-- Legacy unscoped records belong to the stable Default project, even after that project is renamed.
+- The stable Default project is created at startup and remains the default after rename.
 - Use `/api/projects/:projectId/...` for project data. Never add unscoped bypasses.
 
 ## Client/server integration
@@ -130,7 +130,6 @@ Run commands from the repository root:
 
 ```sh
 pnpm install
-docker compose up -d mongodb
 pnpm dev
 pnpm test
 pnpm lint
@@ -140,14 +139,13 @@ pnpm build
 
 The root development command builds shared contracts first, then watches all
 three packages. Recursive builds run in dependency order. For standalone app
-commands, build `@outreachit/shared` first if its output is missing.
+commands, build `@outreacher/shared` first if its output is missing.
 
 Run relevant tests and the lint, typecheck, and build checks after code changes.
 For documentation-only changes, verify content and whitespace; application checks
-are not required. The API integration suite runs against a temporary MongoDB
-instance, or a random isolated database at `TEST_MONGODB_URI` when supplied.
-Never point tests at user data or drop a non-test database. Do not claim tests
-passed when only lint, typecheck, or build was run.
+are not required. The API integration suite creates isolated temporary SQLite
+databases for each test process. Never point tests at user data or a production
+database. Do not claim tests passed when only lint, typecheck, or build was run.
 
 Use a local SMTP capture service or mocks for future email verification.
 

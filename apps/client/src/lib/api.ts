@@ -1,24 +1,31 @@
-import { errorSchema } from '@outreachit/shared';
+import { errorSchema } from '@outreacher/shared';
 
 interface Decoder<T> {
   parse(value: unknown): T;
 }
 
-async function send(path: string, method: string, body?: unknown) {
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) { super(message); }
+}
+
+async function send(path: string, method: string, body?: unknown, signal?: AbortSignal) {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
       method,
+      signal,
       ...(body === undefined
         ? {}
         : {
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error;
     throw new Error(
       'Cannot reach the server. Check that the development server is running.',
+      { cause: error },
     );
   }
   if (!response.ok) {
@@ -30,10 +37,11 @@ async function send(path: string, method: string, body?: unknown) {
           parsed.data.error.message,
           ...(parsed.data.error.details ?? []),
         ].join(' ');
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       /* A proxy error may not contain JSON. */
     }
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
   return response;
 }
@@ -43,8 +51,9 @@ export async function api<T>(
   decoder: Decoder<T>,
   method = 'GET',
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
-  const response = await send(path, method, body);
+  const response = await send(path, method, body, signal);
   const value: unknown = await response.json();
   return decoder.parse(value);
 }
@@ -53,6 +62,7 @@ export async function mutate(
   path: string,
   method: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<void> {
-  await send(path, method, body);
+  await send(path, method, body, signal);
 }

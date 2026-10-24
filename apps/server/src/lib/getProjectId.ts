@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { idSchema } from '@outreachit/shared';
+import { idSchema } from '@outreacher/shared';
 
 const paramsSchema = z.object({ projectId: idSchema });
 export function getProjectId(request: { params: unknown }) {

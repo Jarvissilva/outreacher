@@ -1,48 +1,35 @@
-import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Input } from '@/components/ui/input';
+import { useRouteAction } from '@/lib/route-data';
+import type { loader } from '@/pages/SettingsPage';
 import { Braces, Pencil, Plus, Trash2 } from 'lucide-react';
-import { fieldInputSchema, fieldsSchema } from '@outreachit/shared';
-import type { CustomField } from '@outreachit/shared';
-import { api, mutate } from '@/lib/api';
-import { invalidateProject } from '@/lib/projects';
+import { useState } from 'react';
+import { useLoaderData } from 'react-router';
+import { z } from 'zod';
+
 import { EmptyState } from '@/components/feedback/EmptyState';
 import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 import { Modal } from '@/components/feedback/Modal';
+import type { CustomField } from '@outreacher/shared';
 
 export function CustomFieldsSettings({ projectId }: { projectId: string }) {
-  const queryClient = useQueryClient();
-  const fields = useQuery({
-    queryKey: ['project', projectId, 'fields'],
-    queryFn: () => api(`/projects/${projectId}/custom-fields`, fieldsSchema),
-  });
+  const { fields } = useLoaderData<typeof loader>();
+  const operation = useRouteAction(`/projects/${projectId}/settings`);
+  const [error, setError] = useState<unknown>();
+  async function save() {
+    setError(undefined);
+    try { await operation.submit('save-field', { id: editing?.field?.id, input: { label, key } }, z.unknown()); setEditing(null); } catch (e) { setError(e); }
+  }
+  async function remove(field: CustomField) {
+    setError(undefined);
+    try { await operation.submit('delete-field', { id: field.id }, z.unknown()); setDeleting(null); } catch (e) { setError(e); }
+  }
   const [editing, setEditing] = useState<{ field?: CustomField } | null>(null);
   const [deleting, setDeleting] = useState<CustomField | null>(null);
   const [label, setLabel] = useState('');
   const [key, setKey] = useState('');
-  const save = useMutation({
-    mutationFn: () =>
-      mutate(
-        `/projects/${projectId}/custom-fields${editing?.field ? `/${editing.field.id}` : ''}`,
-        editing?.field ? 'PUT' : 'POST',
-        fieldInputSchema.parse({ label, key }),
-      ),
-    onSuccess: async () => {
-      setEditing(null);
-      await invalidateProject(queryClient, projectId);
-    },
-  });
-  const remove = useMutation({
-    mutationFn: (field: CustomField) =>
-      mutate(`/projects/${projectId}/custom-fields/${field.id}`, 'DELETE'),
-    onSuccess: async () => {
-      setDeleting(null);
-      await invalidateProject(queryClient, projectId);
-    },
-  });
   function open(field?: CustomField) {
-    save.reset();
+    setError(undefined);
     setLabel(field?.label ?? '');
     setKey(field?.key ?? '');
     setEditing({ field });
@@ -58,35 +45,19 @@ export function CustomFieldsSettings({ projectId }: { projectId: string }) {
           Create field
         </Button>
       </div>
-      <ErrorMessage error={fields.error} />
       <section className="panel">
         <div className="panel-title">
           <div>
             <h2>
               Contact fields{' '}
-              <span className="count-badge">{fields.data?.length ?? 0}</span>
+              <span className="count-badge">{fields.length ?? 0}</span>
             </h2>
             <p>
               Text fields appear on contact forms and in CSV column mapping.
             </p>
           </div>
         </div>
-        {fields.isPending ? (
-          <div className="loading-state" role="status">
-            Loading custom fields…
-          </div>
-        ) : fields.isError ? (
-          <EmptyState
-            icon={<Braces size={28} />}
-            title="Custom fields are unavailable"
-            description="Check the server connection and try again."
-            action={
-              <Button variant="outline" onClick={() => void fields.refetch()}>
-                Try again
-              </Button>
-            }
-          />
-        ) : !fields.data.length ? (
+        {!fields.length ? (
           <EmptyState
             icon={<Braces size={28} />}
             title="No custom fields yet"
@@ -100,7 +71,7 @@ export function CustomFieldsSettings({ projectId }: { projectId: string }) {
           />
         ) : (
           <div className="catalog-list">
-            {fields.data.map((field) => (
+            {fields.map((field) => (
               <div className="catalog-row" key={field.id}>
                 <div>
                   <strong>{field.label}</strong>
@@ -122,7 +93,7 @@ export function CustomFieldsSettings({ projectId }: { projectId: string }) {
                     className="text-destructive"
                     aria-label={`Delete ${field.label}`}
                     onClick={() => {
-                      remove.reset();
+                      setError(undefined);
                       setDeleting(field);
                     }}
                   >
@@ -138,17 +109,17 @@ export function CustomFieldsSettings({ projectId }: { projectId: string }) {
         <Modal
           title={editing.field ? 'Edit field' : 'Create custom field'}
           onClose={() => {
-            if (!save.isPending) setEditing(null);
+            if (!operation.busy) setEditing(null);
           }}
         >
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              save.mutate();
+              void save();
             }}
           >
             <div className="modal-body">
-              <ErrorMessage error={save.error} />
+              <ErrorMessage error={error} />
               <label>
                 Label
                 <Input
@@ -180,13 +151,13 @@ export function CustomFieldsSettings({ projectId }: { projectId: string }) {
               <Button
                 type="button"
                 variant="outline"
-                disabled={save.isPending}
+                disabled={operation.busy}
                 onClick={() => setEditing(null)}
               >
                 Cancel
               </Button>
-              <Button disabled={save.isPending}>
-                {save.isPending ? 'Saving…' : 'Save field'}
+              <Button disabled={operation.busy}>
+                {operation.busy ? 'Saving…' : 'Save field'}
               </Button>
             </div>
           </form>
@@ -197,26 +168,26 @@ export function CustomFieldsSettings({ projectId }: { projectId: string }) {
           title={`Delete “${deleting.label}”?`}
           description="Fields with saved values cannot be deleted. Clear those values from contacts first."
           onClose={() => {
-            if (!remove.isPending) setDeleting(null);
+            if (!operation.busy) setDeleting(null);
           }}
         >
           <div className="modal-body">
-            <ErrorMessage error={remove.error} />
+            <ErrorMessage error={error} />
           </div>
           <div className="modal-footer">
             <Button
               variant="outline"
-              disabled={remove.isPending}
+              disabled={operation.busy}
               onClick={() => setDeleting(null)}
             >
               Cancel
             </Button>
             <Button
               variant="destructive"
-              disabled={remove.isPending}
-              onClick={() => remove.mutate(deleting)}
+              disabled={operation.busy}
+              onClick={() => void remove(deleting)}
             >
-              {remove.isPending ? 'Deleting…' : 'Delete field'}
+              {operation.busy ? 'Deleting…' : 'Delete field'}
             </Button>
           </div>
         </Modal>

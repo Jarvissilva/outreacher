@@ -8,11 +8,17 @@ import {
 import nodemailer from 'nodemailer';
 import sanitizeHtml from 'sanitize-html';
 import { convert } from 'html-to-text';
-import { csvColumns } from '@outreachit/shared';
-import type { TemplateInput } from '@outreachit/shared';
-import { MailAccountModel } from '../models/EmailModels.js';
-import { FieldModel, ProjectModel } from '../models/index.js';
-import type { ContactDocument } from '../models/index.js';
+import { csvColumns } from '@outreacher/shared';
+import type { TemplateInput } from '@outreacher/shared';
+import {
+  findAccount,
+  serializeAccount as serializeAccountRecord,
+} from '../db/repositories/mailAccounts.js';
+import type { MailAccount } from '../db/repositories/mailAccounts.js';
+import { listFields } from '../db/repositories/customFields.js';
+import { findProject } from '../db/repositories/projects.js';
+import type { Project } from '../db/repositories/projects.js';
+import type { Contact } from '../db/repositories/contacts.js';
 import { HttpError } from '../lib/HttpError.js';
 function key() {
   const value = process.env.EMAIL_ENCRYPTION_KEY ?? '';
@@ -85,7 +91,7 @@ export async function validateTemplate(
   projectId: string,
   input: TemplateInput,
 ) {
-  const fields = await FieldModel.find({ projectId });
+  const fields = listFields(projectId);
   const allowed = new Set<string>([
     ...csvColumns,
     'unsubscribeUrl',
@@ -117,7 +123,7 @@ const escape = (v: string) =>
   );
 export function renderMessage(
   template: { subject: string; html: string },
-  contact: ContactDocument,
+  contact: Contact,
   unsubscribeUrl: string,
 ) {
   const warnings = new Set<string>();
@@ -126,7 +132,7 @@ export function renderMessage(
       let result = '';
       if (field === 'unsubscribeUrl') result = unsubscribeUrl;
       else if (field.startsWith('custom.'))
-        result = contact.customFields.get(field.slice(7)) ?? '';
+        result = contact.customFields[field.slice(7)] ?? '';
       else {
         const standard = csvColumns.find((k) => k === field);
         if (standard) result = contact[standard];
@@ -191,54 +197,29 @@ export function verifyUnsubscribe(token: string) {
     throw new HttpError(400, 'Invalid unsubscribe link.');
   return { projectId, contactId };
 }
-export async function getMailAccount(projectId: string, accountId: string) {
-  const account = await MailAccountModel.findOne({
-    _id: accountId,
-    projectId,
-    archivedAt: null,
-  });
+export async function getMailAccount(
+  projectId: string,
+  accountId: string,
+): Promise<MailAccount> {
+  const account = findAccount(projectId, accountId);
   if (!account)
     throw new HttpError(404, 'Mail account not found in this project.');
   return account;
 }
-export async function getSendingSettings(projectId: string) {
-  const project = await ProjectModel.findById(projectId);
+export async function getSendingSettings(projectId: string): Promise<Project> {
+  const project = findProject(projectId);
   if (!project) throw new HttpError(404, 'Project not found.');
   return project;
 }
-export function serializeSendingSettings(
-  s: Awaited<ReturnType<typeof getSendingSettings>>,
-) {
+export function serializeSendingSettings(project: Project) {
   return {
-    projectId: String(s._id),
-    hourlyLimit: s.hourlyLimit,
-    timeZone: s.timeZone,
+    projectId: project.id,
+    hourlyLimit: project.hourlyLimit,
+    timeZone: project.timeZone,
   };
 }
-export function serializeAccount(
-  s: Awaited<ReturnType<typeof getMailAccount>>,
-) {
-  return {
-    id: String(s._id),
-    projectId: String(s.projectId),
-    name: s.name,
-    host: s.host ?? '',
-    port: s.port ?? 587,
-    tlsMode: s.tlsMode,
-    username: s.username ?? '',
-    senderName: s.senderName ?? '',
-    senderEmail: s.senderEmail ?? '',
-    replyTo: s.replyTo ?? '',
-    passwordConfigured: Boolean(s.passwordEncrypted),
-    incoming: s.incoming ? {
-      enabled: s.incoming.enabled ?? false, host: s.incoming.host ?? '', port: s.incoming.port ?? 993,
-      tlsMode: s.incoming.tlsMode ?? 'tls', useSmtpCredentials: s.incoming.useSmtpCredentials ?? true,
-      username: s.incoming.username ?? '', passwordConfigured: Boolean(s.incoming.passwordEncrypted),
-    } : null,
-    sendingError: s.sendingError,
-  };
-}
-export type SmtpSettings = Awaited<ReturnType<typeof getMailAccount>>;
+export const serializeAccount = serializeAccountRecord;
+export type SmtpSettings = MailAccount;
 export function createTransport(s: SmtpSettings) {
   return nodemailer.createTransport({
     host: s.host ?? '',

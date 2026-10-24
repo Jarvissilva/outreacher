@@ -8,19 +8,49 @@ import {
   audienceSchema,
   campaignContentSchema,
   recipientStates,
-} from '@outreachit/shared';
+} from '@outreacher/shared';
 import { getProjectId } from '../lib/getProjectId.js';
 import { HttpError } from '../lib/HttpError.js';
-import { ContactModel } from '../models/index.js';
 import {
-  MailAccountModel,
-  TemplateModel,
-  CampaignModel,
-  MessageModel,
-  RecipientJobModel,
+  findContactById,
+  suppressContact,
+} from '../db/repositories/contacts.js';
+import {
+  archiveAccount,
+  createAccount,
+  listAccounts,
+  updateAccount,
+} from '../db/repositories/mailAccounts.js';
+import {
+  createTemplate,
+  deleteTemplate as deleteTemplateRecord,
+  findTemplate,
+  listTemplates as listTemplateRecords,
   serializeTemplate,
+  updateTemplate,
+} from '../db/repositories/templates.js';
+import {
+  createCampaign,
+  deleteCampaignDraft,
+  hasUnfinishedCampaignForAccount,
+  listCampaigns as listCampaignRecords,
   serializeCampaign,
-} from '../models/EmailModels.js';
+  transitionCampaign,
+  updateCampaignDraft,
+} from '../db/repositories/campaigns.js';
+import {
+  hasUnfinishedMessageForAccount,
+  listMessageIdsForAccount,
+} from '../db/repositories/messages.js';
+import {
+  countJobs,
+  countJobsByState,
+  deleteJobsForCampaign,
+  hasLiveJobsForMessages,
+  listJobs,
+  skipQueuedJobs,
+} from '../db/repositories/jobs.js';
+import { saveSendingSettings as saveSendingSettingsRecord } from '../db/repositories/projects.js';
 import {
   encryptPassword,
   serializeAccount,
@@ -37,82 +67,72 @@ import {
 import {
   audienceContacts,
   campaignMessage,
-  findCampaign,
+  findCampaign as findCampaignService,
   validateCampaign,
   launchCampaign,
 } from '../services/campaignService.js';
+
 export const readSendingSettings: RequestHandler = async (req, res) => {
   res.json(
     serializeSendingSettings(await getSendingSettings(getProjectId(req))),
   );
 };
+
 export const saveSendingSettings: RequestHandler = async (req, res) => {
-  const settings = await getSendingSettings(getProjectId(req));
+  const projectId = getProjectId(req);
   const input = sendingSettingsInputSchema.parse(req.body);
-  settings.hourlyLimit = input.hourlyLimit;
-  settings.timeZone = input.timeZone;
-  await settings.save();
+  const settings = saveSendingSettingsRecord(projectId, input);
+  if (!settings) throw new HttpError(404, 'Project not found.');
   res.json(serializeSendingSettings(settings));
 };
+
 export const listEmailAccounts: RequestHandler = async (req, res) => {
-  res.json(
-    (
-      await MailAccountModel.find({
-        projectId: getProjectId(req),
-        archivedAt: null,
-      }).sort({ createdAt: 1, _id: 1 })
-    ).map(serializeAccount),
-  );
+  res.json(listAccounts(getProjectId(req)).map(serializeAccount));
 };
+
 export const saveEmailAccount: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
-  if (req.params.accountId)
-    await getMailAccount(projectId, idSchema.parse(req.params.accountId));
+  const accountId = req.params.accountId
+    ? idSchema.parse(req.params.accountId)
+    : undefined;
+  if (accountId) await getMailAccount(projectId, accountId);
   const { password, ...input } = emailAccountInputSchema.parse(req.body);
   const data = {
     ...input,
     sendingError: '',
     ...(password ? { passwordEncrypted: encryptPassword(password) } : {}),
   };
-  const account = req.params.accountId
-    ? await MailAccountModel.findOneAndUpdate(
-      {
-        _id: idSchema.parse(req.params.accountId),
-        projectId,
-        archivedAt: null,
-      },
-      { $set: data },
-      { returnDocument: 'after' },
-    )
-    : await MailAccountModel.create({ projectId, ...data });
+  const account = accountId
+    ? updateAccount(projectId, accountId, data)
+    : createAccount(projectId, data);
   if (!account) throw new HttpError(404, 'Mail account not found.');
-  res.status(req.params.accountId ? 200 : 201).json(serializeAccount(account));
+  res.status(accountId ? 200 : 201).json(serializeAccount(account));
 };
+
 export const deleteEmailAccount: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const accountId = idSchema.parse(req.params.accountId);
   await getMailAccount(projectId, accountId);
-  if (
-    await CampaignModel.exists({
-      projectId,
-      emailAccountId: accountId,
-      state: { $in: ['preparing', 'scheduled', 'active', 'paused'] },
-    })
-  )
+  if (hasUnfinishedCampaignForAccount(projectId, accountId))
     throw new HttpError(
       409,
       'Cancel campaigns using this account or return scheduled campaigns to draft before removing it.',
     );
-  if (await MessageModel.exists({ projectId, emailAccountId: accountId, $or: [{ state: { $in: ['preparing', 'preparation_failed', 'active', 'paused'] } }, { kind: 'reply', state: 'draft' }] })) throw new HttpError(409, 'Delete reply drafts or cancel unfinished messages using this account before removing it.');
-  const messages = await MessageModel.find({ projectId, emailAccountId: accountId }).select('_id');
-  if (await RecipientJobModel.exists({ projectId, messageId: { $in: messages.map(m => m._id) }, state: { $in: ['claimed', 'sending'] } }))
-    throw new HttpError(409, 'Wait for in-flight standalone emails to finish before removing this account.');
-  await MailAccountModel.updateOne(
-    { _id: accountId, projectId, archivedAt: null },
-    { $set: { archivedAt: new Date(), passwordEncrypted: '', incoming: null } },
-  );
+  if (hasUnfinishedMessageForAccount(projectId, accountId))
+    throw new HttpError(
+      409,
+      'Delete reply drafts or cancel unfinished messages using this account before removing it.',
+    );
+  const messageIds = listMessageIdsForAccount(projectId, accountId);
+  if (hasLiveJobsForMessages(projectId, messageIds))
+    throw new HttpError(
+      409,
+      'Wait for in-flight standalone emails to finish before removing this account.',
+    );
+  archiveAccount(projectId, accountId);
   res.status(204).end();
 };
+
 export const verifySettings: RequestHandler = async (req, res) => {
   const transport = createTransport(
     await getMailAccount(
@@ -123,12 +143,13 @@ export const verifySettings: RequestHandler = async (req, res) => {
   try {
     await transport.verify();
     res.json({ ok: true });
-  } catch (e) {
-    throw new HttpError(400, classifySmtpError(e).reason);
+  } catch (error) {
+    throw new HttpError(400, classifySmtpError(error).reason);
   } finally {
     transport.close();
   }
 };
+
 export const testEmail: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const input = z
@@ -139,27 +160,20 @@ export const testEmail: RequestHandler = async (req, res) => {
     })
     .strict()
     .parse(req.body);
-  const s = await getMailAccount(
+  const account = await getMailAccount(
     projectId,
     idSchema.parse(req.params.accountId),
   );
   let message = {
-    subject: 'OutreachIt SMTP test',
+    subject: 'Outreacher SMTP test',
     html: '<p>Your email connection works.</p>',
     text: 'Your email connection works.',
   };
   if (input.templateId) {
-    const template = await TemplateModel.findOne({
-      _id: input.templateId,
-      projectId,
-    });
+    const template = findTemplate(projectId, input.templateId);
     const contact = input.contactId
-      ? await ContactModel.findOne({
-        _id: input.contactId,
-        projectId,
-        deletedAt: null,
-      })
-      : null;
+      ? findContactById(projectId, input.contactId)
+      : undefined;
     if (!template || !contact)
       throw new HttpError(
         404,
@@ -168,82 +182,78 @@ export const testEmail: RequestHandler = async (req, res) => {
     message = renderMessage(
       template,
       contact,
-      unsubscribeUrl(projectId, String(contact._id)),
+      unsubscribeUrl(projectId, contact.id),
     );
   }
-  const transport = createTransport(s);
+  const transport = createTransport(account);
   try {
     await transport.sendMail({
-      from: { name: s.senderName ?? '', address: s.senderEmail ?? '' },
+      from: {
+        name: account.senderName ?? '',
+        address: account.senderEmail ?? '',
+      },
       to: input.recipient,
-      ...(s.replyTo ? { replyTo: s.replyTo } : {}),
+      ...(account.replyTo ? { replyTo: account.replyTo } : {}),
       ...message,
     });
     res.json({ ok: true });
-  } catch (e) {
-    throw new HttpError(400, classifySmtpError(e).reason);
+  } catch (error) {
+    throw new HttpError(400, classifySmtpError(error).reason);
   } finally {
     transport.close();
   }
 };
+
 export const listTemplates: RequestHandler = async (req, res) => {
   res.json(
-    (
-      await TemplateModel.find({ projectId: getProjectId(req) }).sort({
-        createdAt: -1,
-      })
-    ).map(serializeTemplate),
+    listTemplateRecords(getProjectId(req)).map(serializeTemplate),
   );
 };
+
 export const readTemplate: RequestHandler = async (req, res) => {
-  const t = await TemplateModel.findOne({
-    _id: idSchema.parse(req.params.id),
-    projectId: getProjectId(req),
-  });
-  if (!t) throw new HttpError(404, 'Template not found.');
-  res.json(serializeTemplate(t));
+  const template = findTemplate(
+    getProjectId(req),
+    idSchema.parse(req.params.id),
+  );
+  if (!template) throw new HttpError(404, 'Template not found.');
+  res.json(serializeTemplate(template));
 };
+
 export const saveTemplate: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const input = await validateTemplate(
     projectId,
     templateInputSchema.parse(req.body),
   );
-  const t = req.params.id
-    ? await TemplateModel.findOneAndUpdate(
-      { _id: idSchema.parse(req.params.id), projectId },
-      { $set: input },
-      { returnDocument: 'after' },
-    )
-    : await TemplateModel.create({ projectId, ...input });
-  if (!t) throw new HttpError(404, 'Template not found.');
-  res.status(req.params.id ? 200 : 201).json(serializeTemplate(t));
+  const template = req.params.id
+    ? updateTemplate(projectId, idSchema.parse(req.params.id), input)
+    : createTemplate(projectId, input);
+  if (!template) throw new HttpError(404, 'Template not found.');
+  res
+    .status(req.params.id ? 200 : 201)
+    .json(serializeTemplate(template));
 };
+
 export const deleteTemplate: RequestHandler = async (req, res) => {
   if (
-    !(
-      await TemplateModel.deleteOne({
-        _id: idSchema.parse(req.params.id),
-        projectId: getProjectId(req),
-      })
-    ).deletedCount
+    !deleteTemplateRecord(
+      getProjectId(req),
+      idSchema.parse(req.params.id),
+    )
   )
     throw new HttpError(404, 'Template not found.');
   res.status(204).end();
 };
+
 export const previewTemplate: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const input = z
     .object({ contactId: idSchema, ...templateInputSchema.shape })
     .strict()
     .parse(req.body);
-  const contact = await ContactModel.findOne({
-    _id: input.contactId,
-    projectId,
-    deletedAt: null,
-  });
+  const contact = findContactById(projectId, input.contactId);
   if (!contact) throw new HttpError(404, 'Contact not found.');
-  const t = await validateTemplate(
+  const template = await validateTemplate(
     projectId,
     templateInputSchema.parse({
       name: input.name,
@@ -254,56 +264,53 @@ export const previewTemplate: RequestHandler = async (req, res) => {
   res.json({
     projectId,
     ...renderMessage(
-      t,
+      template,
       contact,
-      unsubscribeUrl(projectId, String(contact._id)),
+      unsubscribeUrl(projectId, contact.id),
     ),
   });
 };
+
 export const listCampaigns: RequestHandler = async (req, res) => {
-  res.json(
-    (
-      await CampaignModel.find({ projectId: getProjectId(req) }).sort({
-        createdAt: -1,
-      })
-    ).map(serializeCampaign),
-  );
+  res.json(listCampaignRecords(getProjectId(req)).map(serializeCampaign));
 };
+
 export const readCampaign: RequestHandler = async (req, res) => {
   res.json(
     serializeCampaign(
-      await findCampaign(getProjectId(req), idSchema.parse(req.params.id)),
+      await findCampaignService(
+        getProjectId(req),
+        idSchema.parse(req.params.id),
+      ),
     ),
   );
 };
+
 export const saveCampaign: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   if (req.params.id)
-    await findCampaign(projectId, idSchema.parse(req.params.id));
+    await findCampaignService(projectId, idSchema.parse(req.params.id));
   const input = await validateCampaign(projectId, req.body);
-  const c = req.params.id
-    ? await CampaignModel.findOneAndUpdate(
-      { _id: idSchema.parse(req.params.id), projectId, state: 'draft' },
-      { $set: input },
-      { returnDocument: 'after' },
-    )
-    : await CampaignModel.create({ ...input, projectId });
-  if (!c)
+  const campaign = req.params.id
+    ? updateCampaignDraft(projectId, idSchema.parse(req.params.id), input)
+    : createCampaign(projectId, input);
+  if (!campaign)
     throw new HttpError(409, 'Campaign is missing or is no longer a draft.');
-  res.status(req.params.id ? 200 : 201).json(serializeCampaign(c));
+  res
+    .status(req.params.id ? 200 : 201)
+    .json(serializeCampaign(campaign));
 };
+
 export const deleteCampaign: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const id = idSchema.parse(req.params.id);
-  await findCampaign(projectId, id);
-  if (
-    !(await CampaignModel.deleteOne({ _id: id, projectId, state: 'draft' }))
-      .deletedCount
-  )
+  await findCampaignService(projectId, id);
+  if (!deleteCampaignDraft(projectId, id))
     throw new HttpError(409, 'Only drafts can be deleted.');
-  await RecipientJobModel.deleteMany({ projectId, campaignId: id });
+  deleteJobsForCampaign(projectId, id);
   res.status(204).end();
 };
+
 export const previewAudience: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const input = z
@@ -311,29 +318,31 @@ export const previewAudience: RequestHandler = async (req, res) => {
     .strict()
     .parse(req.body);
   const template = await campaignMessage(projectId, {
-    templateId: input.templateId, message: input.message,
+    templateId: input.templateId,
+    message: input.message,
   });
   const contacts = await audienceContacts(projectId, input.audience);
-  const eligible = contacts.filter((c) => !c.suppressed);
+  const eligible = contacts.filter((contact) => !contact.suppressed);
   const warnings = new Set<string>();
-  for (const c of eligible)
+  for (const contact of eligible)
     for (const warning of renderMessage(
       template,
-      c,
+      contact,
       'https://example.invalid/unsubscribe',
     ).warnings)
-      warnings.add(`${c.email}: ${warning}`);
+      warnings.add(`${contact.email}: ${warning}`);
   res.json({
     projectId,
     eligible: eligible.length,
-    recipients: eligible.map((c) => ({
-      contactId: String(c._id),
-      email: c.email,
+    recipients: eligible.map((contact) => ({
+      contactId: contact.id,
+      email: contact.email,
     })),
     excluded: contacts.length - eligible.length,
     warnings: [...warnings],
   });
 };
+
 export const launch: RequestHandler = async (req, res) => {
   res.json(
     serializeCampaign(
@@ -345,56 +354,55 @@ export const launch: RequestHandler = async (req, res) => {
     ),
   );
 };
+
 export const campaignAction: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const id = idSchema.parse(req.params.id);
   const action = z
     .enum(['pause', 'resume', 'cancel', 'draft'])
     .parse(req.params.action);
-  const current = await findCampaign(projectId, id);
+  const current = await findCampaignService(projectId, id);
   const transitions = {
-    pause: { from: ['active'], to: 'paused' },
-    resume: { from: ['paused'], to: 'active' },
-    cancel: { from: ['active', 'paused', 'scheduled'], to: 'cancelled' },
-    draft: { from: ['scheduled', 'preparation_failed'], to: 'draft' },
+    pause: { from: ['active'] as const, to: 'paused' as const },
+    resume: { from: ['paused'] as const, to: 'active' as const },
+    cancel: {
+      from: ['active', 'paused', 'scheduled'] as const,
+      to: 'cancelled' as const,
+    },
+    draft: {
+      from: ['scheduled', 'preparation_failed'] as const,
+      to: 'draft' as const,
+    },
   };
-  const t = transitions[action];
-  if (
-    action === 'resume' &&
-    (!current.emailAccountId ||
-      (await getMailAccount(projectId, String(current.emailAccountId)))
-        .sendingError)
-  )
-    throw new HttpError(409, 'Save corrected SMTP settings before resuming.');
-  const c = await CampaignModel.findOneAndUpdate(
-    {
-      _id: id,
-      projectId,
-      state: { $in: t.from },
-      ...(action === 'draft' ? { startedAt: null } : {}),
-    },
-    {
-      $set: {
-        state: t.to,
-        error: '',
-        ...(action === 'draft' ? { total: 0 } : {}),
-      },
-    },
-    { returnDocument: 'after' },
+  const transition = transitions[action];
+  if (action === 'resume') {
+    if (
+      !current.emailAccountId ||
+      (await getMailAccount(projectId, current.emailAccountId)).sendingError
+    )
+      throw new HttpError(409, 'Save corrected SMTP settings before resuming.');
+  }
+  const campaign = transitionCampaign(
+    projectId,
+    id,
+    [...transition.from],
+    transition.to,
+    action === 'draft' ? { clearStartedAt: true, resetTotal: true } : {},
   );
-  if (!c)
+  if (!campaign)
     throw new HttpError(409, 'Campaign state changed; reload and try again.');
   if (action === 'cancel')
-    await RecipientJobModel.updateMany(
-      { projectId, campaignId: id, state: { $in: ['queued', 'claimed'] } },
-      { $set: { state: 'skipped', reason: 'Campaign cancelled.' } },
+    skipQueuedJobs(
+      { projectId, campaignId: id },
+      'Campaign cancelled.',
     );
-  res.json(serializeCampaign(c));
+  res.json(serializeCampaign(campaign));
 };
+
 export const report: RequestHandler = async (req, res) => {
   const projectId = getProjectId(req);
   const id = idSchema.parse(req.params.id);
-  const campaign = await findCampaign(projectId, id);
+  const campaign = await findCampaignService(projectId, id);
   const query = z
     .object({
       state: z.enum(recipientStates).optional(),
@@ -403,67 +411,67 @@ export const report: RequestHandler = async (req, res) => {
     })
     .strict()
     .parse(req.query);
-  const filter = {
+  const baseFilter = {
     projectId,
     campaignId: id,
-    preparationToken: campaign.preparationToken,
+    ...(campaign.preparationToken
+      ? { preparationToken: campaign.preparationToken }
+      : {}),
+  };
+  const filter = {
+    ...baseFilter,
     ...(query.state ? { state: query.state } : {}),
   };
-  const rows = await RecipientJobModel.find(filter)
-    .sort({ _id: 1 })
-    .skip(query.format === 'csv' ? 0 : (query.page - 1) * 100)
-    .limit(query.format === 'csv' ? 0 : 100);
-  const items = rows.map((j) => ({
-    id: String(j._id),
+  const rows = listJobs(
+    filter,
+    query.format === 'csv'
+      ? {}
+      : { limit: 100, offset: (query.page - 1) * 100 },
+  );
+  const items = rows.map((job) => ({
+    id: job.id,
     projectId,
     campaignId: id,
-    email: j.email,
-    state: j.state,
-    reason: j.reason,
-    attempts: j.attempts.map((a) => ({
-      at: a.at.toISOString(),
-      state: a.state,
-      reason: a.reason,
+    email: job.email,
+    state: job.state,
+    reason: job.reason,
+    attempts: job.attempts.map((attempt) => ({
+      at: attempt.at.toISOString(),
+      state: attempt.state,
+      reason: attempt.reason,
     })),
   }));
   if (query.format === 'csv') {
-    const cell = (s: string) =>
-      `"${(/^[=+@\-\t\r]/.test(s) ? "'" : '') + s.replace(/"/g, '""')}"`;
+    const cell = (value: string) =>
+      `"${(/^[=+@\-\t\r]/.test(value) ? "'" : '') + value.replace(/"/g, '""')}"`;
     res
       .attachment('campaign-report.csv')
       .type('text/csv')
       .send(
         [
           'email,state,reason',
-          ...items.map((j) => [j.email, j.state, j.reason].map(cell).join(',')),
+          ...items
+            .map((job) =>
+              [job.email, job.state, job.reason].map(cell).join(','),
+            ),
         ].join('\r\n'),
       );
     return;
   }
-  const counts: Record<string, number> = {};
-  for (const state of recipientStates)
-    counts[state] = await RecipientJobModel.countDocuments({
-      projectId,
-      campaignId: id,
-      preparationToken: campaign.preparationToken,
-      state,
-    });
   res.json({
     projectId,
     items,
-    total: await RecipientJobModel.countDocuments(filter),
-    counts,
+    total: countJobs(filter),
+    counts: countJobsByState(baseFilter),
   });
 };
+
 export const unsubscribe: RequestHandler = async (req, res) => {
   const { projectId, contactId } = verifyUnsubscribe(
     z.string().parse(req.params.token),
   );
   if (req.method === 'POST') {
-    await ContactModel.updateOne(
-      { _id: contactId, projectId },
-      { $set: { suppressed: true } },
-    );
+    suppressContact(projectId, contactId);
     res
       .type('html')
       .send(

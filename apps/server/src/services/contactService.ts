@@ -1,5 +1,5 @@
-import type { ContactInput } from '@outreachit/shared';
-import { FieldModel } from '../models/index.js';
+import type { ContactInput } from '@outreacher/shared';
+import { countFieldsByKeys } from '../db/repositories/customFields.js';
 import { HttpError } from '../lib/HttpError.js';
 
 export async function validateContactReferences(
@@ -7,10 +7,7 @@ export async function validateContactReferences(
   projectId: string,
 ) {
   const keys = Object.keys(input.customFields);
-  if (
-    (await FieldModel.countDocuments({ projectId, key: { $in: keys } })) !==
-    keys.length
-  ) {
+  if (countFieldsByKeys(projectId, keys) !== keys.length) {
     throw new HttpError(400, 'One or more custom fields no longer exist.');
   }
 }

@@ -1,5 +1,3 @@
-import { mongo } from 'mongoose';
-
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -10,5 +8,10 @@ export class HttpError extends Error {
 }
 
 export function isDuplicate(error: unknown) {
-  return error instanceof mongo.MongoServerError && error.code === 11000;
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+      error.code === 'SQLITE_CONSTRAINT_PRIMARYKEY')
+  );
 }

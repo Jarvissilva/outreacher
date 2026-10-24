@@ -1,18 +1,19 @@
-import { IncomingSettings } from './IncomingSettings';
-import { useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { z } from 'zod';
+import { useRouteAction } from '@/lib/route-data';
+import type { loader } from '@/pages/SettingsPage';
+import type { EmailAccount } from '@outreacher/shared';
 import {
-  emailAccountSchema,
   emailAccountInputSchema,
+  emailAccountSchema,
   sendingSettingsSchema,
-  sendingSettingsInputSchema,
-} from '@outreachit/shared';
-import type { EmailAccount } from '@outreachit/shared';
-import { api, mutate } from '@/lib/api';
+} from '@outreacher/shared';
+import { useState } from 'react';
+import { useLoaderData } from 'react-router';
+import { z } from 'zod';
+import { IncomingSettings } from './IncomingSettings';
+
+import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ErrorMessage } from '@/components/feedback/ErrorMessage';
 function AccountForm({
   projectId,
   account,
@@ -22,7 +23,7 @@ function AccountForm({
   account?: EmailAccount;
   onClose: () => void;
 }) {
-  const client = useQueryClient();
+  const operation = useRouteAction(`/projects/${projectId}/settings`);
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   async function save(form: HTMLFormElement) {
@@ -34,15 +35,7 @@ function AccountForm({
         ...Object.fromEntries(data),
         port: Number(data.get('port')),
       });
-      await api(
-        `/projects/${projectId}/email-accounts${account ? `/${account.id}` : ''}`,
-        emailAccountSchema,
-        account ? 'PUT' : 'POST',
-        input,
-      );
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'email-accounts'],
-      });
+      await operation.submit('save-account', { id: account?.id, input }, emailAccountSchema);
       onClose();
     } catch (e) {
       setError(e);
@@ -144,7 +137,7 @@ function AccountCard({
   account: EmailAccount;
   onEdit: () => void;
 }) {
-  const client = useQueryClient();
+  const operation = useRouteAction(`/projects/${projectId}/settings`);
   const [recipient, setRecipient] = useState('');
   const [error, setError] = useState<unknown>();
   const [message, setMessage] = useState('');
@@ -159,25 +152,8 @@ function AccountCard({
     setError(undefined);
     setMessage('');
     try {
-      const path = `/projects/${projectId}/email-accounts/${account.id}`;
-      if (kind === 'delete') {
-        await mutate(path, 'DELETE');
-        await client.invalidateQueries({
-          queryKey: ['project', projectId, 'email-accounts'],
-        });
-      } else {
-        await api(
-          `${path}/${kind}`,
-          z.object({ ok: z.boolean() }),
-          'POST',
-          kind === 'test' ? { recipient } : {},
-        );
-        setMessage(
-          kind === 'verify'
-            ? 'SMTP connection verified.'
-            : 'Test email submitted to SMTP.',
-        );
-      }
+      await operation.submit(`${kind === 'delete' ? 'delete' : kind === 'verify' ? 'verify' : 'test'}-account`, { id: account.id, input: kind === 'test' ? { recipient } : {} }, z.unknown());
+      if (kind !== 'delete') setMessage(kind === 'verify' ? 'SMTP connection verified.' : 'Test email submitted to SMTP.');
     } catch (e) {
       setError(e);
     } finally {
@@ -249,7 +225,7 @@ function AccountCard({
           Send test email
         </Button>
       </div>
-      <IncomingSettings key={JSON.stringify(account.incoming)} projectId={projectId} account={account} />
+      <IncomingSettings projectId={projectId} account={account} />
       <ErrorMessage error={error} />
       {message && (
         <p role="status" className="text-xs">
@@ -260,12 +236,8 @@ function AccountCard({
   );
 }
 function SendingSettings({ projectId }: { projectId: string }) {
-  const client = useQueryClient();
-  const query = useQuery({
-    queryKey: ['project', projectId, 'sending-settings'],
-    queryFn: () =>
-      api(`/projects/${projectId}/sending-settings`, sendingSettingsSchema),
-  });
+  const operation = useRouteAction(`/projects/${projectId}/settings`);
+  const { settings } = useLoaderData<typeof loader>();
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -275,18 +247,7 @@ function SendingSettings({ projectId }: { projectId: string }) {
     setMessage('');
     try {
       const data = new FormData(form);
-      await api(
-        `/projects/${projectId}/sending-settings`,
-        sendingSettingsSchema,
-        'PUT',
-        sendingSettingsInputSchema.parse({
-          hourlyLimit: Number(data.get('hourlyLimit')),
-          timeZone: data.get('timeZone'),
-        }),
-      );
-      await client.invalidateQueries({
-        queryKey: ['project', projectId, 'sending-settings'],
-      });
+      await operation.submit('save-sending', { hourlyLimit: Number(data.get('hourlyLimit')), timeZone: data.get('timeZone') }, sendingSettingsSchema);
       setMessage('Sending settings saved.');
     } catch (e) {
       setError(e);
@@ -294,11 +255,8 @@ function SendingSettings({ projectId }: { projectId: string }) {
       setBusy(false);
     }
   }
-  if (query.isPending) return <p>Loading sending settings…</p>;
-  if (query.error) return <ErrorMessage error={query.error} />;
   return (
     <form
-      key={JSON.stringify(query.data)}
       className="my-6 grid max-w-2xl gap-3"
       onSubmit={(e) => {
         e.preventDefault();
@@ -317,13 +275,13 @@ function SendingSettings({ projectId }: { projectId: string }) {
           type="number"
           min="1"
           max="10000"
-          defaultValue={query.data.hourlyLimit}
+          defaultValue={settings.hourlyLimit}
           required
         />
       </label>
       <label>
         IANA time zone
-        <Input name="timeZone" defaultValue={query.data.timeZone} required />
+        <Input name="timeZone" defaultValue={settings.timeZone} required />
       </label>
       <p className="text-sm">
         Your browser time zone:{' '}
@@ -336,11 +294,7 @@ function SendingSettings({ projectId }: { projectId: string }) {
   );
 }
 export function EmailSettings({ projectId }: { projectId: string }) {
-  const query = useQuery({
-    queryKey: ['project', projectId, 'email-accounts'],
-    queryFn: () =>
-      api(`/projects/${projectId}/email-accounts`, z.array(emailAccountSchema)),
-  });
+  const { accounts } = useLoaderData<typeof loader>();
   const [editing, setEditing] = useState<EmailAccount | 'new' | null>(null);
   return (
     <section className="my-8">
@@ -352,9 +306,7 @@ export function EmailSettings({ projectId }: { projectId: string }) {
         Add SMTP accounts here, then choose which account to use in each
         campaign or template test.
       </p>
-      <ErrorMessage error={query.error} />
-      {query.isPending && <p>Loading mail accounts…</p>}
-      {query.data?.length === 0 && <p>No mail accounts yet.</p>}
+      {accounts?.length === 0 && <p>No mail accounts yet.</p>}
       {editing && (
         <AccountForm
           key={editing === 'new' ? 'new' : editing.id}
@@ -364,7 +316,7 @@ export function EmailSettings({ projectId }: { projectId: string }) {
         />
       )}
       <div className="flex flex-wrap gap-3">
-        {query.data?.map((account) => (
+        {accounts?.map((account) => (
           <AccountCard
             key={account.id}
             projectId={projectId}

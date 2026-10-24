@@ -1,7 +1,7 @@
-# OutreachIt
+# Outreacher
 
 A self-hosted email outreach manager built with React,
-Node.js, MongoDB, and TypeScript in a pnpm workspace. The client uses React Router
+Node.js, SQLite, and TypeScript in a pnpm workspace. The client uses React Router
 and shadcn/ui with Tailwind CSS.
 
 ## Available now
@@ -25,13 +25,12 @@ Follow-up sequences, attachments, images and open/click tracking are outside thi
 
 - Node.js 22.13+ (22.x), or Node.js 24+
 - pnpm 10.22.0
-- MongoDB 7+ (local Docker Compose uses MongoDB 8), or Docker with Compose
+- A writable local data directory
 
 ## Development
 
 ```sh
 pnpm install
-docker compose up -d mongodb
 pnpm dev
 ```
 
@@ -44,19 +43,20 @@ The app has no authentication and binds to localhost by default.
 Server settings have local defaults. To customize them, copy
 `apps/server/.env.example` to `apps/server/.env`:
 
-| Variable      | Default                                | Purpose                                      |
-| ------------- | -------------------------------------- | -------------------------------------------- |
-| `HOST`        | `127.0.0.1`                            | API bind address                             |
-| `PORT`        | `3001`                                 | API port; keep the Vite proxy target in sync |
-| `MONGODB_URI` | `mongodb://127.0.0.1:27017/outreachit` | Database connection                          |
+| Variable        | Default        | Purpose                                                    |
+| --------------- | -------------- | ---------------------------------------------------------- |
+| `HOST`          | `127.0.0.1`    | API bind address                                           |
+| `PORT`          | `3001`         | API port; keep the Vite proxy target in sync               |
+| `DATA_DIR`      | `~/.local/share/outreacher` | Directory containing the SQLite database                   |
+| `DATABASE_PATH` | unset          | Optional explicit SQLite file path; overrides `DATA_DIR`   |
 
-If MongoDB is already running, omit the Compose command and set `MONGODB_URI` as
-needed. The server verifies the connection and indexes before accepting requests.
-`GET /api/health` returns database readiness; disconnected databases return 503.
-
-Compose stores data in a named volume and exposes MongoDB only on localhost.
-`docker compose down` stops it and preserves data. Do not remove the volume unless
-you intend to delete its data.
+The default file is `~/.local/share/outreacher/outreacher.sqlite`, independent of
+the working directory. Relative `DATA_DIR` and `DATABASE_PATH` overrides resolve
+from the working directory (`apps/server` for the documented pnpm commands). The server opens the SQLite
+database, applies the schema, and verifies it before accepting requests.
+`GET /api/health` returns database readiness; an unavailable or unwritable database
+returns 503. The database uses WAL mode, so keep the `.sqlite`, `-wal`, and `-shm`
+files together when copying it.
 
 ## Working with contacts
 
@@ -89,14 +89,99 @@ are cleared.
 - `apps/client`: React + Vite; `router.tsx` defines React Router routes, `layouts/`
   defines page shells, `pages/` contains route screens, and `components/ui/` contains
   shadcn/ui primitives. Feature components live in their own component folders.
-- `apps/server`: Express API; `models/` holds Mongoose models, `controllers/` holds
-  HTTP handlers, `routes/` maps URLs to controllers, `services/` holds reusable
-  workflow logic, and `middleware/`, `config/`, and `migrations/` handle startup
-  and cross-cutting concerns.
+- `apps/server`: Express API; `db/` holds the SQLite schema and repositories,
+  `controllers/` holds HTTP handlers, `routes/` maps URLs to controllers,
+  `services/` holds reusable workflow logic, and `middleware/` and `config/`
+  handle startup and cross-cutting concerns.
 - `packages/shared`: shared TypeScript contracts
 
-The root development command builds shared contracts first, then watches all
-three packages. Build commands run in dependency order.
+The root development command builds shared contracts first, then watches the
+shared, server and client packages. Build commands run in dependency order.
+
+## MCP integration
+
+MCP starts automatically inside the Express server at `/api/mcp`, using
+Streamable HTTP with JSON responses. It shares the application's port, SQLite
+database and sending worker. There is no separate package, stdio process,
+persistent MCP session or additional worker. Tools reuse the existing REST handlers
+for project isolation, validation, sanitization, suppression and queue behavior.
+
+Start Outreacher normally (`pnpm dev`, or build and run `pnpm start`). In an MCP
+client that supports Streamable HTTP, configure the server URL:
+
+```json
+{
+  "mcpServers": {
+    "outreacher": {
+      "url": "http://127.0.0.1:3001/api/mcp"
+    }
+  }
+}
+```
+
+Use `http://127.0.0.1:6004/api/mcp` for the production deployment below. Client
+configuration syntax varies; choose Streamable HTTP rather than legacy SSE.
+POST carries protocol requests; GET and DELETE return 405. The internal REST URL
+is generated from `HOST` and `PORT`, using loopback for wildcard binds.
+`OUTREACHER_API_URL` is no longer used.
+
+MCP validates the request Host and any supplied Origin. Defaults allow only
+`localhost`, `127.0.0.1` and `[::1]` on the configured server port, with their HTTP
+origins. For a private reverse proxy, add exact comma-separated Host authorities
+(hostname and port when nonstandard) and browser Origin values to the server's
+environment, for example:
+
+```dotenv
+MCP_ALLOWED_HOSTS=outreach.example.com
+MCP_ALLOWED_ORIGINS=https://outreach.example.com
+```
+
+Local defaults remain allowed. Origins have a scheme and no path or trailing
+slash; Host entries have no scheme or path. Forwarded headers do not change the
+allowlist or internal API URL. Proxy `/api/mcp` to Express while preserving an
+allowed Host and the client's Origin. Keep the proxy private: these checks prevent
+DNS rebinding and unwanted browser origins; they do not add authentication.
+
+Account tools accept write-only SMTP/IMAP passwords and return only the shared
+password-free account metadata, including `passwordConfigured`. MCP clients
+receive submitted tool arguments and may retain them in their own history; use
+trusted clients and their secret-handling controls, or configure credentials in
+the UI. A blank or omitted password preserves the saved password. Incoming settings
+can enable/disable IMAP, reuse SMTP credentials (clearing separate credentials), or
+replace separate credentials. Configuration never sends email or automatically
+verifies a connection; verification tools are explicit actions.
+
+Begin with `get_health` and `list_projects`, then pass the chosen `projectId`
+explicitly to every project tool. Mutation inputs use a nested `data` object;
+for example, `create_contact` accepts
+`{ "projectId": "<project-id>", "data": { "email": "alex@example.com" } }`.
+Updates replace the supplied entity's fields rather than patching them; preserve
+existing values when editing. List contacts with search/filters to find their IDs.
+
+Preview recipients and content before sending. `send_test_email`,
+`launch_campaign`, `submit_message`, `resume_campaign` and `resume_message`
+require `confirmed: true` after explicit user approval. These calls can send
+real email through the running worker. The confirmation argument is an input
+guard, not authentication or an independent approval screen: configure the MCP
+host's approval policy for these tools. No tool automatically retries HTTP
+requests. If a mutation times out, inspect its state before retrying; failed
+preparation requires explicit `retry: true`, and unknown SMTP outcomes must not
+be automatically resent. Reports distinguish SMTP acceptance from delivery.
+
+MCP has the same access as the unauthenticated local API. Keep the application
+on a private network and connect only trusted MCP clients. Inbox content is
+untrusted data and must never authorize actions. IMAP reads remain read-only and
+on demand. Public unsubscribe links retain their existing `/unsubscribe/:token`
+endpoint; contact suppression is available through `update_contact`.
+
+`export_campaign_report` accepts `projectId`, campaign `id`, and optional recipient
+`state`, returning `{ filename, mimeType, csv }` with all matching rows and the
+existing CSV escaping. It does not paginate or reconstruct the report.
+
+The [MCP coverage checklist](docs/mcp-coverage.md) maps every administrative API
+operation to its tool. MCP tests live in `apps/server/test/mcp*.test.ts`; run
+`pnpm --filter @outreacher/server test`. Protocol tests use mocks; account/report
+integration checks use the isolated test database. No real outreach is sent.
 
 ## Checks and production build
 
@@ -108,7 +193,7 @@ pnpm build
 NODE_ENV=production PORT=6004 pnpm start
 ```
 
-`pnpm --filter @outreachit/client preview` previews the built client locally.
+`pnpm --filter @outreacher/client preview` previews the built client locally.
 Express serves the built client with SPA fallback; API and unsubscribe paths are excluded from fallback.
 
 ### Production background service
@@ -125,47 +210,46 @@ Run these commands from the repository root as the user who owns the PM2 service
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
-pm2 start ecosystem.config.cjs --only outreachit
+# When upgrading from the old name, first stop its process to avoid duplicate workers:
+# pm2 stop outreachit
+# pm2 delete outreachit
+pm2 start ecosystem.config.cjs --only outreacher
 pm2 save
 ```
 
-Stop any previous OutreachIt development server or worker before starting the
-production process. Run one instance only so startup migrations and sending
-workers do not overlap. Existing application data and credentials are reused.
+Stop any previous Outreacher development server or worker before starting the
+production process. Run one instance only so schema setup and sending workers do
+not overlap. Existing database files and credentials are reused.
 
 ```sh
-pm2 status outreachit
-pm2 logs outreachit --lines 50
+pm2 status outreacher
+pm2 logs outreacher --lines 50
 curl --fail http://127.0.0.1:6004/api/health
 ```
 
-For updates, stop OutreachIt before installing/building, then start it again:
+For updates, stop Outreacher before installing/building, then start it again:
 
 ```sh
-pm2 stop outreachit
+pm2 stop outreacher
 pnpm install --frozen-lockfile
 pnpm build
-pm2 restart ecosystem.config.cjs --only outreachit --update-env
+pm2 restart ecosystem.config.cjs --only outreacher --update-env
 pm2 save
 ```
 
-Use `pm2 stop outreachit` to stop the service. To restore saved processes after
+Use `pm2 stop outreacher` to stop the service. To restore saved processes after
 a reboot, configure PM2's startup service once using `pm2 startup` and follow its
 printed instructions. Reuse an existing enabled PM2 startup service when present.
 Keep the app bound to localhost for internal use; it has no authentication.
 
 Client tests use Vitest and Testing Library to exercise project navigation,
-sidebar creation, Settings, redirects, and state reset. API integration tests use a
-temporary MongoDB instance through `mongodb-memory-server`. On the
-first run it may download a MongoDB binary and therefore need internet access.
-Alternatively, use an existing local test server:
+sidebar creation, Settings, redirects, and state reset. API integration tests use
+isolated temporary SQLite files created for each test process. They never use the
+application database or real contact data.
 
 ```sh
-TEST_MONGODB_URI=mongodb://127.0.0.1:27017 pnpm test
+pnpm test
 ```
-
-The suite creates and drops only its own randomly named test database. It never
-uses the application database or real contact data.
 
 ## API foundation
 
@@ -198,35 +282,28 @@ resets filters, pagination, and dialogs. New projects open immediately after cre
 Project deletion is not supported. Previous project `/contacts` and `/fields` URLs
 redirect to the project root and Settings respectively.
 
-Before accepting requests, the server runs an idempotent migration that creates a
-**Default project**, assigns existing unscoped contacts (including deleted records)
-and custom fields to it, builds project-scoped unique indexes, and removes legacy
-global email/key indexes. Database access must allow index creation and deletion.
-Stored suppression preferences and deleted-email reservations are retained. Legacy
-tags and contact `tagIds` are deleted. Back up an existing database before upgrading.
-Stop all previous servers and workers before starting the new version. The Default project's identity remains stable when renamed.
-Old `/contacts` and `/fields` browser links redirect to that project.
+## Database
 
-Mail migration runs before HTTP requests and worker activity. It copies every SMTP
-account from `emailsettings` into `mailaccounts`, preserving IDs, SMTP values,
-encrypted passwords, archive status, and errors. Existing campaign account
-references, sender/message snapshots, queue states, and attempt history survive.
-Original single-account campaigns receive that account's ID; ambiguous campaigns
-require an explicit account choice before launch.
+Existing installations can keep their current SQLite file by setting `DATABASE_PATH`
+to its absolute path before restarting. Files are not moved or renamed automatically;
+keep the existing encryption key unchanged.
 
-Shared `hourlyLimit`, `timeZone`, and `nextSendAt` are stored on each Project.
-Migration preserves existing project values, otherwise uses `projectemailsettings`,
-then original SMTP settings, then defaults of 60/hour, UTC, and no pending
-reservation. Conflicting copies or ambiguous SMTP policies fail startup. Migration
-verifies copied records before dropping `emailsettings` and `projectemailsettings`
-and can safely resume after interruption. Database permissions must allow
-collection deletion as well as index management. Keep `EMAIL_ENCRYPTION_KEY`
-unchanged when upgrading or restoring a backup.
+Outreacher stores projects, contacts, custom fields, mail accounts, templates,
+campaigns, standalone messages, recipient jobs, and attempts in one SQLite file.
+The file is created automatically on first start at
+`~/.local/share/outreacher/outreacher.sqlite`, or under `DATA_DIR` (or at
+`DATABASE_PATH`). The current schema starts fresh at version 1; there is no importer
+from the earlier MongoDB version, and old MongoDB data is left untouched.
 
-The `/api/projects/:projectId/email-accounts` and `/sending-settings` APIs remain.
-The obsolete `/email-settings` endpoints have been removed and return 404.
-Campaign saves require `emailAccountId`; SMTP verification and test sends use the
-explicit `/email-accounts/:accountId/verify` and `/test` endpoints.
+The database uses foreign keys, WAL journaling, partial unique indexes, and a
+single-process worker. Keep one API process per database file. The project-scoped
+email/key uniqueness constraints, deleted-email reservations, suppression,
+recipient-job ownership, atomic claims, and rate reservations are enforced by the
+database and repositories.
+
+Keep `EMAIL_ENCRYPTION_KEY` stable across restarts and back it up separately from
+the database. Losing or changing the key prevents decryption of saved SMTP and IMAP
+passwords. Do not commit the database, `-wal`, or `-shm` files.
 
 ## Email workflow
 
@@ -294,24 +371,22 @@ skips unsubmitted work; in-flight SMTP submissions can still finish. Repeating s
 for the same draft returns the existing submission. Interrupted preparations stay unsendable
 until an explicit retry. Ambiguous SMTP outcomes never resend automatically.
 
-Drafts and submissions live in the `messages` collection; no hidden campaigns or reusable
+Drafts and submissions live in the `messages` table; no hidden campaigns or reusable
 templates are created. All message APIs use `/api/projects/:projectId/messages`:
 GET/POST the collection, GET/PUT/DELETE `/:id` (edit/delete only drafts), POST `/preview`,
 POST `/:id/submit` with `{ "confirmed": true }` (add `"retry": true` only for failed
 preparation), GET `/:id/report?page=1`, and POST `/:id/cancel` or `/:id/resume`.
 Accounts with unfinished submissions or in-flight jobs cannot be removed.
 
-Stop all previous servers and workers before upgrading. Startup creates separate partial
-unique recipient indexes for campaigns and messages before dropping the legacy
-`campaignId/contactId` unique index. This restart-safe migration preserves jobs and attempts
-and rejects invalid ownership. It runs before HTTP requests and worker activity, requires
-index creation/deletion permissions, and must complete before starting any older worker.
-Preserve `messages` with campaigns, recipient jobs, contacts, accounts, projects and the
-unchanged encryption key when backing up or restoring.
+Recipient jobs enforce exactly one owning campaign or message, and partial unique
+indexes prevent duplicate campaign/contact and message/contact recipients while
+allowing null contacts for validated replies. Schema setup runs before HTTP requests
+and worker activity. Back up `messages` together with campaigns, recipient jobs,
+contacts, accounts, projects, and the unchanged encryption key.
 
 ## Worker and reports
 
-The Express process runs a persistent MongoDB scheduler once per second. Keep the
+The Express process runs a persistent SQLite-backed scheduler once per second. Keep the
 server running for scheduled sends; overdue campaigns resume on restart. Atomic job
 claims have renewable 90-second leases. Unsubmitted abandoned claims are requeued;
 interrupted submissions become **Outcome unknown** and are never automatically
@@ -332,17 +407,10 @@ one-click unsubscribe requests.
 
 ## Production and private administration
 
-Build and run locally with `pnpm build` then `pnpm --filter @outreachit/server start`.
-Alternatively set `EMAIL_ENCRYPTION_KEY` and `PUBLIC_UNSUBSCRIBE_BASE_URL` in your
-shell or a root `.env` for Compose interpolation, then run:
-
-```sh
-docker compose up -d --build
-```
-
-The reproducible image uses Node 22 and pnpm 10.22.0, runs as an unprivileged user,
-and serves UI and API from port 3001. Compose publishes the app and MongoDB only on
-localhost. Development can still run only `docker compose up -d mongodb`.
+Build and run locally with `pnpm build` then `pnpm --filter @outreacher/server start`.
+The API serves the built client on the configured host and port. Set
+`EMAIL_ENCRYPTION_KEY` and `PUBLIC_UNSUBSCRIBE_BASE_URL` in `apps/server/.env` or
+your shell. SQLite data stays in `~/.local/share/outreacher` unless overridden.
 
 There are no accounts. Keep administration behind a private network/VPN or an
 authenticated reverse proxy. A public unsubscribe hostname must proxy **only**
@@ -363,18 +431,20 @@ public internet. Signed unsubscribe links contain scoped identifiers, so avoid
 logging full unsubscribe paths at your reverse proxy. In development, open
 unsubscribe URLs directly on the configured Express origin (Vite proxies `/api`).
 
-Back up MongoDB with `mongodump` to access-controlled storage and retain the MongoDB
-volume. Back up the encryption key separately and preserve the public unsubscribe
-URL; losing/changing the key prevents password decryption and invalidates existing
-links. Restore using `mongorestore` into an isolated instance before switching
-production. Stop the worker during backup/restore cutovers and never run a restored
-queue alongside its source: submitted messages cannot be recalled or deduplicated
-across independent databases. Preserve queue and campaign collections together.
-After restore, expired submitting leases become outcome unknown; do not blindly
-requeue them. A replica-set backup/snapshot is preferable for a consistent live
-backup. Verify indexes and application health before resuming.
+Back up the SQLite database to access-controlled storage. Stop the app before a
+file copy, or use SQLite's online backup command, and include the `-wal` and `-shm`
+files when copying manually. Back up the encryption key separately and preserve the
+public unsubscribe URL; losing or changing the key prevents password decryption and
+invalidates existing links. Restore into an isolated location before switching
+production. Never run a restored queue alongside its source: submitted messages
+cannot be recalled or deduplicated across independent databases. After restore,
+expired submitting leases become outcome unknown; do not blindly requeue them.
+Verify application health before resuming.
 
-On upgrade, the original SMTP record becomes the first mail account without changing its ID or encrypted password. Existing campaigns stay linked to that account. Project rate-limit reservations and time zones are migrated separately and retained across restarts. Accounts used by preparing, scheduled, active, or paused campaigns cannot be removed; cancel those campaigns or return scheduled campaigns to draft first. Removing an account clears its saved password and keeps its historical identity. Drafts referencing a removed account must select another account before launch.
+Accounts used by preparing, scheduled, active, or paused campaigns cannot be
+removed; cancel those campaigns or return scheduled campaigns to draft first.
+Removing an account clears its saved password and keeps its historical identity.
+Drafts referencing a removed account must select another account before launch.
 
 Email APIs are project-scoped: `/email-accounts` (GET/POST),
 `/email-accounts/:accountId` (PUT/DELETE), `/email-accounts/:accountId/verify`,
@@ -422,9 +492,8 @@ Send history and share the project sending limit, durable worker, cancellation a
 conservative retry rules. Unknown SMTP outcomes never resend automatically. Delete
 reply drafts or cancel unfinished submissions before removing their account.
 
-Stop older processes before upgrading and run the normal startup migrations before
-restarting workers. Existing accounts remain SMTP-only, and existing standalone
-messages retain Compose behavior. This version does not include folder browsing,
+Stop older processes before upgrading and complete schema setup before restarting
+workers. This version does not include folder browsing,
 read-status changes, Reply all, forwarding, attachments, OAuth or Sent-folder sync;
 replies are not appended to the provider's Sent folder. Use mocks or a local mail
 capture service for tests, never real outreach.

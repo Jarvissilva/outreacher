@@ -1,12 +1,12 @@
-import mongoose from 'mongoose';
 import type { RequestHandler } from 'express';
+import { isDatabaseReady } from '../db/database.js';
 
 export const requireDatabase: RequestHandler = (_request, response, next) => {
-  if (mongoose.connection.readyState !== 1) {
+  if (!isDatabaseReady()) {
     response.status(503).json({
       error: {
         message:
-          'Database unavailable. Start MongoDB and check the server configuration.',
+          'Database unavailable. Check that the configured data directory is writable and restart the server.',
       },
     });
     return;

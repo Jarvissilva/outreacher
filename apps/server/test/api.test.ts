@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { after, before, beforeEach, describe, it } from 'node:test';
-import mongoose from 'mongoose';
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { z } from 'zod';
 import request from 'supertest';
 import {
   contactListSchema,
@@ -13,43 +11,49 @@ import {
   overviewSchema,
   projectSchema,
   projectsSchema,
-} from '@outreachit/shared';
-import { migrateProjects } from '../src/migrations/projects.js';
+} from '@outreacher/shared';
 import { app } from '../src/app.js';
-import { ContactModel, FieldModel, ProjectModel } from '../src/models/index.js';
+import { ensureDefaultProject } from '../src/db/bootstrap.js';
+import {
+  countContacts,
+  findContactByEmail,
+  findContactById,
+} from '../src/db/repositories/contacts.js';
+import { createProject } from '../src/db/repositories/projects.js';
+import { findProject, updateProject } from '../src/db/repositories/projects.js';
+import { isDuplicate } from '../src/lib/HttpError.js';
+import { newId } from '../src/db/values.js';
+import {
+  closeTestDatabase,
+  reopenTestDatabase,
+  resetTestDatabase,
+  setupTestDatabase,
+  teardownTestDatabase,
+  testDatabase,
+} from './support/database.js';
 
-let memory: MongoMemoryServer | undefined;
-let testUri = '';
 let projectId = '';
 const scoped = (path: string) => `/api/projects/${projectId}${path}`;
-const testDatabaseName = `outreachit_test_${randomUUID().replaceAll('-', '')}`;
 
-before(async () => {
-  testUri =
-    process.env.TEST_MONGODB_URI ??
-    (memory = await MongoMemoryServer.create()).getUri();
-  await mongoose.connect(testUri, {
-    dbName: testDatabaseName,
-    autoIndex: false,
-  });
-  await migrateProjects();
+before(() => {
+  setupTestDatabase();
 });
-beforeEach(async () => {
-  await Promise.all([
-    ContactModel.deleteMany({}),
-    ProjectModel.deleteMany({}),
-    FieldModel.deleteMany({}),
-  ]);
-  await migrateProjects();
-  projectId = String((await ProjectModel.findOne({ isDefault: true }))?._id);
+beforeEach(() => {
+  projectId = resetTestDatabase().id;
 });
-after(async () => {
-  // Only the random test database created above is ever dropped.
-  if (mongoose.connection.readyState === 1)
-    await mongoose.connection.dropDatabase();
-  await mongoose.disconnect();
-  await memory?.stop();
+after(() => {
+  teardownTestDatabase();
 });
+
+function rowCount(table: string) {
+  return z
+    .object({ total: z.number().int() })
+    .parse(
+      testDatabase()
+        .prepare(`SELECT COUNT(*) AS total FROM ${table}`)
+        .get(),
+    ).total;
+}
 
 async function addContact(input: Record<string, unknown>) {
   const response = await request(app)
@@ -96,7 +100,7 @@ describe('Contact management', () => {
       .send({ email: contact.email })
       .expect(400);
     await request(app)
-      .delete(scoped(`/contacts/${new mongoose.Types.ObjectId()}`))
+      .delete(scoped(`/contacts/${newId()}`))
       .expect(404);
   });
 
@@ -168,7 +172,7 @@ describe('Contact management', () => {
       duplicates: 1,
       invalid: 0,
     });
-    assert.equal((await ContactModel.findById(contact.id))?.suppressed, true);
+    assert.equal(findContactById(projectId, contact.id, true)?.suppressed, true);
     await request(app)
       .delete(scoped(`/contacts/${contact.id}`))
       .expect(204);
@@ -201,7 +205,7 @@ describe('Contact management', () => {
       ),
     );
     assert.deepEqual(results.map((result) => result.status).sort(), [201, 409]);
-    assert.equal(await ContactModel.countDocuments(), 1);
+    assert.equal(rowCount('contacts'), 1);
   });
 });
 
@@ -280,7 +284,7 @@ describe('CSV imports and reporting', () => {
     assert.equal(preview.ready, 2);
     assert.equal(preview.duplicates, 1);
     assert.equal(preview.invalid, 1);
-    assert.equal(await ContactModel.countDocuments(), 0);
+    assert.equal(rowCount('contacts'), 0);
     const result = importResultSchema.parse(
       (
         await request(app)
@@ -295,9 +299,9 @@ describe('CSV imports and reporting', () => {
       duplicates: 1,
       invalid: 1,
     });
-    const contact = await ContactModel.findOne({ email: 'one@example.com' });
+    const contact = findContactByEmail(projectId, 'one@example.com');
     assert.equal(contact?.firstName, 'Alex, Jr');
-    assert.equal(contact?.customFields.get('interest'), 'Design');
+    assert.equal(contact?.customFields.interest, 'Design');
     const summary = overviewSchema.parse(
       (await request(app).get(scoped('/overview'))).body,
     );
@@ -355,7 +359,7 @@ describe('CSV imports and reporting', () => {
 
   it('reports outages and preserves contacts after reconnection', async () => {
     const contact = await addContact({ email: 'persistent@example.com' });
-    await mongoose.disconnect();
+    closeTestDatabase();
     try {
       const health = await request(app).get('/api/health').expect(503);
       assert.deepEqual(health.body, {
@@ -364,10 +368,7 @@ describe('CSV imports and reporting', () => {
       });
       await request(app).get(scoped('/contacts')).expect(503);
     } finally {
-      await mongoose.connect(testUri, {
-        dbName: testDatabaseName,
-        autoIndex: false,
-      });
+      reopenTestDatabase();
     }
     const list = contactListSchema.parse(
       (await request(app).get(scoped('/contacts')).expect(200)).body,
@@ -410,18 +411,18 @@ describe('Project organization and isolation', () => {
       .send({ name: 'Name' })
       .expect(400);
     await request(app)
-      .put(`/api/projects/${new mongoose.Types.ObjectId()}`)
+      .put(`/api/projects/${newId()}`)
       .send({ name: 'Name' })
       .expect(404);
     await request(app).get('/api/projects/bad/contacts').expect(400);
     await request(app)
-      .get(`/api/projects/${new mongoose.Types.ObjectId()}/contacts`)
+      .get(`/api/projects/${newId()}/contacts`)
       .expect(404);
     await request(app)
       .put(`/api/projects/${projectId}`)
       .send({ name: 'Renamed default' })
       .expect(200);
-    await migrateProjects();
+    ensureDefaultProject();
     const projects = projectsSchema.parse(
       (await request(app).get('/api/projects').expect(200)).body,
     );
@@ -505,7 +506,7 @@ describe('Project organization and isolation', () => {
       ).body,
     );
     assert.equal(otherImport.imported, 1);
-    assert.equal((await ContactModel.findById(contact.id))?.suppressed, true);
+    assert.equal(findContactById(projectId, contact.id, true)?.suppressed, true);
     const directory = projectsSchema.parse(
       (await request(app).get('/api/projects')).body,
     );
@@ -614,86 +615,46 @@ describe('Project organization and isolation', () => {
       .expect(409);
   });
 
-  it('migrates legacy data and indexes idempotently without changing suppression and removes legacy tags', async () => {
-    await Promise.all([
-      ContactModel.deleteMany({}),
-      FieldModel.deleteMany({}),
-      ProjectModel.deleteMany({}),
-    ]);
-    await ContactModel.collection.createIndex({ email: 1 }, { unique: true });
-    await ContactModel.collection.createIndex({ deletedAt: 1, tagIds: 1 });
-    await FieldModel.collection.createIndex({ key: 1 }, { unique: true });
-    const tagId = new mongoose.Types.ObjectId();
-    const db = mongoose.connection.db;
-    assert.ok(db);
-    await db.collection('tags').insertOne({ _id: tagId, name: 'Legacy' });
-    const deleted = await ContactModel.collection.insertOne({
+  it('bootstraps SQLite idempotently and enforces per-project unique reservations', async () => {
+    const project = ensureDefaultProject();
+    assert.equal(ensureDefaultProject().id, project.id);
+    updateProject(project.id, { name: 'Renamed default' });
+    assert.equal(ensureDefaultProject().id, project.id);
+    assert.equal(findProject(project.id)?.isDefault, true);
+
+    const created = await addContact({
       email: 'legacy@example.com',
       suppressed: true,
-      deletedAt: new Date(),
-      tagIds: [tagId],
     });
-    const active = await ContactModel.collection.insertOne({
-      email: 'active@example.com',
-      suppressed: false,
-      deletedAt: null,
-    });
-    await FieldModel.collection.insertOne({ key: 'legacy', label: 'Legacy' });
-    await migrateProjects();
-    const project = await ProjectModel.findOne({ isDefault: true });
-    assert.ok(project);
-    const legacy = await ContactModel.collection.findOne({
-      _id: deleted.insertedId,
-    });
-    assert.equal(String(legacy?.projectId), String(project._id));
-    assert.equal(legacy?.suppressed, true);
-    assert.ok(legacy?.deletedAt);
-    const raw = await db
-      .collection('contacts')
-      .findOne({ _id: deleted.insertedId });
-    assert.equal(raw?.tagIds, undefined);
-    assert.equal(await db.listCollections({ name: 'tags' }).hasNext(), false);
     assert.equal(
-      String((await ContactModel.findById(active.insertedId))?.projectId),
-      String(project._id),
+      findContactById(projectId, created.id, true)?.suppressed,
+      true,
     );
-    assert.equal(
-      String((await FieldModel.findOne({ key: 'legacy' }))?.projectId),
-      String(project._id),
-    );
-    for (const [collection, key] of [
-      [ContactModel.collection, 'email'],
-      [FieldModel.collection, 'key'],
-    ] as const) {
-      const indexes = await collection.indexes();
-      assert.ok(
-        indexes.some(
-          (index) =>
-            index.unique && 'projectId' in index.key && key in index.key,
-        ),
-      );
-      assert.ok(
-        !indexes.some(
-          (index) =>
-            index.unique &&
-            Object.keys(index.key).length === 1 &&
-            key in index.key,
-        ),
-      );
-    }
-    await migrateProjects();
-    assert.equal(await ProjectModel.countDocuments(), 1);
-    assert.equal(await ContactModel.countDocuments(), 2);
-    assert.equal(await FieldModel.countDocuments(), 1);
-    projectId = String(project._id);
     await request(app)
       .post(scoped('/contacts'))
-      .send({ email: 'legacy@example.com' })
+      .send({ email: 'LEGACY@example.com' })
       .expect(409);
+    createProject({ name: 'Research' });
+    assert.throws(
+      () => createProject({ name: 'research' }),
+      (error: unknown) => isDuplicate(error),
+    );
+
+    await request(app)
+      .delete(scoped(`/contacts/${created.id}`))
+      .expect(204);
+    await request(app)
+      .post(scoped('/contacts'))
+      .send({ email: created.email })
+      .expect(409);
+
     const other = await addProject('After migration');
     await request(app)
       .post(`/api/projects/${other.id}/contacts`)
-      .send({ email: 'legacy@example.com' })
+      .send({ email: created.email })
       .expect(201);
+    assert.equal(countContacts(projectId), 0);
+    assert.equal(countContacts(other.id), 1);
+    assert.equal(rowCount('projects'), 3);
   });
 });

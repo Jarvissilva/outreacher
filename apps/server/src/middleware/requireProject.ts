@@ -1,5 +1,5 @@
 import type { RequestHandler } from 'express';
-import { ProjectModel } from '../models/index.js';
+import { findProject } from '../db/repositories/projects.js';
 import { HttpError } from '../lib/HttpError.js';
 import { getProjectId } from '../lib/getProjectId.js';
 
@@ -8,8 +8,7 @@ export const requireProject: RequestHandler = async (
   _response,
   next,
 ) => {
-  const projectId = getProjectId(request);
-  if (!(await ProjectModel.exists({ _id: projectId })))
+  if (!findProject(getProjectId(request)))
     throw new HttpError(404, 'Project not found.');
   next();
 };

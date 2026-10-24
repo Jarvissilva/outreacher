@@ -1,10 +1,10 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { z } from 'zod';
-import { inboxIdentitySchema } from '@outreachit/shared';
+import { inboxIdentitySchema } from '@outreacher/shared';
 import { getMailAccount, decryptPassword, cleanHtml, plainText } from './emailService.js';
 import { HttpError } from '../lib/HttpError.js';
-import { MessageModel } from '../models/EmailModels.js';
+import { createMessage } from '../db/repositories/messages.js';
 
 export const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 // A deliberately narrow Message-ID grammar prevents header injection and invalid threading.
@@ -88,12 +88,28 @@ export async function readInbox(client: ImapFlow, accountId: string, value: unkn
 export async function createReply(projectId: string, accountId: string, value: unknown) {
   const mail = await withInbox(projectId, accountId, client => readInbox(client, accountId, value));
   if (!mail.recipient) throw new HttpError(400, 'This message has no valid reply address.');
-  return MessageModel.create({
-    projectId, kind: 'reply', emailAccountId: accountId, addresses: [mail.recipient],
-    subject: /^re\s*:/i.test(mail.subject) ? mail.subject : `Re: ${mail.subject}`,
-    html: '', replyContext: { accountId, uidValidity: mail.uidValidity, uid: mail.uid,
-      recipient: mail.recipient, messageId: mail.messageId, references: mail.references,
-      subject: mail.subject, from: mail.from, text: mail.text.slice(0, 100000),
+  return createMessage(
+    projectId,
+    {
+      subject: /^re\s*:/i.test(mail.subject) ? mail.subject : `Re: ${mail.subject}`,
+      html: '',
+      emailAccountId: accountId,
+      contactIds: [],
+      addresses: [mail.recipient],
     },
-  });
+    {
+      kind: 'reply',
+      replyContext: {
+        accountId,
+        uidValidity: mail.uidValidity,
+        uid: mail.uid,
+        recipient: mail.recipient,
+        messageId: mail.messageId,
+        references: mail.references,
+        subject: mail.subject,
+        from: mail.from,
+        text: mail.text.slice(0, 100000),
+      },
+    },
+  );
 }
