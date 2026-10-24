@@ -7,7 +7,7 @@ export function Brand() {
       <span className="brand-icon">
         <Mail size={21} />
       </span>
-      outreach<span>er</span>
+      Outreach<span>er</span>
       <span className="brand-period">.</span>
     </Link>
   );
