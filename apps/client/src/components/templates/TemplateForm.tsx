@@ -101,7 +101,7 @@ export function TemplateForm({
           {
             '{{firstName}}, {{lastName}}, {{email}}, {{company}}, {{phone}}, {{website}}, {{city}}, {{state}}, {{country}}, {{source}}, {{notes}}, {{custom.field_key}}, {{unsubscribeUrl}}'
           }
-          . A missing unsubscribe link is added automatically.
+          . An unsubscribe link is added automatically when configured.
         </p>
         <div
           className="flex flex-wrap gap-2"

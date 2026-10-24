@@ -636,7 +636,7 @@ export function CampaignDraft({
                     <EditorContent editor={editor} />
                     <p className="text-xs text-muted-foreground">
                       Personalize with {'{{firstName}}, {{company}}, or {{custom.field_key}}'}.
-                      An unsubscribe link is added automatically.
+                      An unsubscribe link is added automatically when configured.
                     </p>
                   </>
                 )}

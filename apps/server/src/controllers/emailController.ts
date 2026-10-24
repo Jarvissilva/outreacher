@@ -328,7 +328,7 @@ export const previewAudience: RequestHandler = async (req, res) => {
     for (const warning of renderMessage(
       template,
       contact,
-      'https://example.invalid/unsubscribe',
+      unsubscribeUrl(projectId, contact.id),
     ).warnings)
       warnings.add(`${contact.email}: ${warning}`);
   res.json({

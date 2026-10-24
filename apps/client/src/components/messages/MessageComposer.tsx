@@ -124,7 +124,7 @@ export function MessageComposer({ projectId, message, onNew }: { projectId: stri
         </select>
         <details hidden={isReply} className="compose-personalization">
           <summary>Personalize</summary>
-          <p>Use {'{{firstName}}, {{company}}, or {{custom.field_key}}'}. An unsubscribe link is added automatically.</p>
+          <p>Use {'{{firstName}}, {{company}}, or {{custom.field_key}}'}. An unsubscribe link is added automatically when configured.</p>
         </details>
       </div>
       <div className="compose-footer">

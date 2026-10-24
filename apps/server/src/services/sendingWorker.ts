@@ -254,7 +254,7 @@ export async function workerTick(
           ...(validReply
             ? { inReplyTo: job.inReplyTo || undefined, references: job.references }
             : {}),
-          headers: validReply
+          headers: validReply || !job.unsubscribeUrl
             ? {}
             : {
                 'List-Unsubscribe': `<${job.unsubscribeUrl}>`,

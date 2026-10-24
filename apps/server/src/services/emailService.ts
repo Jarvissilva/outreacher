@@ -152,11 +152,7 @@ export function renderMessage(
 }
 export function unsubscribeUrl(projectId: string, contactId: string) {
   const base = process.env.PUBLIC_UNSUBSCRIBE_BASE_URL;
-  if (!base)
-    throw new HttpError(
-      400,
-      'Configure PUBLIC_UNSUBSCRIBE_BASE_URL before launching.',
-    );
+  if (!base) return '';
   let url: URL;
   try {
     url = new URL(base);

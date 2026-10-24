@@ -81,6 +81,7 @@ before(() => {
   setupTestDatabase();
 });
 beforeEach(async () => {
+  process.env.PUBLIC_UNSUBSCRIBE_BASE_URL = 'https://unsubscribe.example.com';
   resetTestDatabase();
   projectId = findDefaultProject()?.id ?? '';
   otherId = createProject({ name: 'Other' }).id;
@@ -254,6 +255,110 @@ it('sanitizes rich text, rejects unknown placeholders and renders escaped values
     })
     .expect(404);
 });
+for (const base of [undefined, '', 'https://unsubscribe.example.com']) {
+  it(`previews and sends outreach with unsubscribe configuration ${String(base)}`, async () => {
+    if (base === undefined) delete process.env.PUBLIC_UNSUBSCRIBE_BASE_URL;
+    else process.env.PUBLIC_UNSUBSCRIBE_BASE_URL = base;
+    const person = await contact(projectId, { firstName: 'Alex' });
+    const suppressed = await contact(projectId, { suppressed: true });
+    const t = await template('<p>Hello {{firstName}}</p><p>{{unsubscribeUrl}}</p>');
+    const url = unsubscribeUrl(projectId, person.id);
+    const expected = renderMessage(t, person, url);
+    assert.equal(Boolean(url), Boolean(base));
+    assert.equal(expected.html.includes('/unsubscribe/'), Boolean(base));
+    const withoutPlaceholder = renderMessage({ subject: 'Hello', html: '<p>Hello</p>' }, person, url);
+    assert.equal(withoutPlaceholder.html.includes('Unsubscribe'), Boolean(base));
+    assert.equal(expected.warnings.includes('Missing value: unsubscribeUrl'), !base);
+    assert.ok(!expected.html.includes('{{'));
+    const preview = await request(app).post(path('/templates/preview'))
+      .send({ name: t.name, subject: t.subject, html: t.html, contactId: person.id }).expect(200);
+    assert.equal(preview.body.html, expected.html);
+    assert.deepEqual(preview.body.warnings, expected.warnings);
+    const audience = await request(app).post(path('/campaigns/audience-preview'))
+      .send({ templateId: t.id, audience: { mode: 'all' } }).expect(200);
+    assert.equal(audience.body.eligible, 1);
+    assert.equal(audience.body.excluded, 1);
+    assert.deepEqual(audience.body.warnings, expected.warnings.map((warning) => `${person.email}: ${warning}`));
+    const input = { emailAccountId: accountId, subject: t.subject, html: t.html, contactIds: [person.id, suppressed.id], addresses: [] };
+    const composePreview = await request(app).post(path('/messages/preview')).send(input).expect(200);
+    assert.equal(composePreview.body.eligible, 1);
+    assert.equal(composePreview.body.excluded, 1);
+    assert.equal(composePreview.body.recipients[0].html, expected.html);
+    assert.deepEqual(composePreview.body.recipients[0].warnings, expected.warnings);
+
+    // Only the template test uses SMTP, captured on a local ephemeral port.
+    const captured: string[] = [];
+    const server = new SMTPServer({
+      authOptional: true,
+      disabledCommands: ['STARTTLS'],
+      onData(stream, _session, callback) {
+        let raw = '';
+        stream.on('data', (chunk: Buffer) => { raw += chunk.toString(); });
+        stream.on('end', () => { captured.push(raw); callback(); });
+      },
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.server.address();
+      assert.ok(address && typeof address !== 'string');
+      await request(app).put(path(`/email-accounts/${accountId}`)).send({ ...settings, port: address.port }).expect(200);
+      await request(app).post(path(`/email-accounts/${accountId}/test`))
+        .send({ recipient: 'capture@example.com', templateId: t.id, contactId: person.id }).expect(200);
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0]?.includes('/unsubscribe/'), Boolean(base));
+      if (!base) assert.ok(!/List-Unsubscribe|\/unsubscribe\//i.test(captured[0] ?? ''));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+
+    const campaign = await draft({ templateId: t.id });
+    assert.equal((await launch(campaign.id)).state, 'active');
+    const message = await messageDraft(input);
+    await request(app).post(path(`/messages/${message.id}/submit`)).send({ confirmed: true }).expect(200);
+    assert.equal(jobCount({ projectId }), 2);
+    for (const filter of [{ campaignId: campaign.id }, { messageId: message.id }]) {
+      assert.equal(firstJob({ projectId, ...filter })?.unsubscribeUrl, url);
+    }
+    // Configuration changes must not alter the frozen jobs in either direction.
+    process.env.PUBLIC_UNSUBSCRIBE_BASE_URL = base ? '' : 'https://later.example.com';
+    let sent = 0;
+    for (let i = 0; i < 2; i++) {
+      await resetRate();
+      await workerTick(async (_project, mail) => {
+        sent++;
+        assert.equal(mail.html, expected.html);
+        assert.equal(mail.text, expected.text);
+        assert.equal(mail.to, person.email);
+        assert.deepEqual(mail.headers, base ? {
+          'List-Unsubscribe': `<${url}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        } : {});
+      });
+    }
+    assert.equal(sent, 2);
+  });
+}
+it('rejects invalid configured unsubscribe URLs before previewing or preparing outreach', async () => {
+  const person = await contact();
+  const t = await template();
+  const campaign = await draft({ templateId: t.id });
+  const input = { emailAccountId: accountId, subject: t.subject, html: t.html, contactIds: [person.id], addresses: [] };
+  const message = await messageDraft(input);
+  for (const base of ['invalid', 'ftp://example.com', 'https://user:pass@example.com', 'https://example.com/?query=yes', 'https://example.com/#fragment', ' ']) {
+    process.env.PUBLIC_UNSUBSCRIBE_BASE_URL = base;
+    assert.throws(() => unsubscribeUrl(projectId, person.id), /Invalid public unsubscribe base URL/);
+    await request(app).post(path('/templates/preview'))
+      .send({ name: t.name, subject: t.subject, html: t.html, contactId: person.id }).expect(503);
+    await request(app).post(path('/campaigns/audience-preview'))
+      .send({ templateId: t.id, audience: { mode: 'all' } }).expect(503);
+    await request(app).post(path('/messages/preview')).send(input).expect(503);
+    await request(app).post(path(`/email-accounts/${accountId}/test`))
+      .send({ recipient: 'capture@example.com', templateId: t.id, contactId: person.id }).expect(503);
+    await request(app).post(path(`/campaigns/${campaign.id}/launch`)).send({ confirmed: true }).expect(503);
+    await request(app).post(path(`/messages/${message.id}/submit`)).send({ confirmed: true }).expect(503);
+    assert.equal(jobCount({ projectId }), 0);
+  }
+});
 it('isolates every resource lookup and campaign action across projects', async () => {
   const t = await template();
   const c = await draft();
@@ -330,6 +435,7 @@ it('snapshots recipients and messages, makes launch idempotent and shares projec
   );
 });
 it('suppression, deletion and changed addresses block subsequent queued submissions', async () => {
+  delete process.env.PUBLIC_UNSUBSCRIBE_BASE_URL;
   const suppressed = await contact();
   const deleted = await contact();
   const changed = await contact();
@@ -350,6 +456,7 @@ it('GET unsubscribe only confirms; POST and one-click suppress idempotently in o
   const c = await contact();
   const other = await contact(otherId, { email: c.email });
   const url = new URL(unsubscribeUrl(projectId, c.id));
+  delete process.env.PUBLIC_UNSUBSCRIBE_BASE_URL;
   await request(app).get(url.pathname).expect(200);
   assert.equal(contactById(c.id)?.suppressed, false);
   for (let i = 0; i < 2; i++)
